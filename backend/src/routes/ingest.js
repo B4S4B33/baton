@@ -11,7 +11,8 @@ import {
   clearAllClaims,
   bulkCreateClaims,
 } from "../services/neo4jService.js";
-import { claims, sources, stats, neo4jAvailable } from "../store.js";
+import { extractClaims, scoreConfidence, detectContradictions } from "../services/llm.js";
+import { claims, sources, stats } from "../store.js";
 
 const router = express.Router();
 
@@ -47,6 +48,66 @@ async function fetchComments(commentsUrl, headers) {
   const res = await fetch(commentsUrl, { headers });
   if (!res.ok) return [];
   return await res.json();
+}
+
+// Map LLM claim types to our claim types
+function mapClaimType(llmType) {
+  const typeMap = {
+    DECISION: "decision",
+    DECISIONS: "decision",
+    OPEN_QUESTION: "question",
+    OPEN_QUESTIONS: "question",
+    TASK: "task",
+    TASKS: "task",
+    DEPENDENCY: "dependency",
+    DEPENDENCIES: "dependency",
+    RISK: "risk",
+    RISKS: "risk",
+    CONTACT: "contact",
+    CONTACTS: "contact",
+  };
+  return typeMap[llmType] || "decision";
+}
+
+// Extract claims from source text using LLM
+async function extractClaimsFromText(text, sourceType) {
+  if (!text || text.trim().length < 10) return [];
+
+  try {
+    const extracted = await extractClaims(text, sourceType);
+    const claims = [];
+
+    // Process each category from the LLM response
+    for (const [key, value] of Object.entries(extracted)) {
+      if (!Array.isArray(value)) continue;
+
+      for (const item of value) {
+        const claimText = typeof item === "string" ? item : item.text || item.title || JSON.stringify(item);
+        const claimType = mapClaimType(key);
+
+        // Score confidence using LLM
+        let confidence = 0.7;
+        try {
+          const score = await scoreConfidence(claimText, sourceType, new Date().toISOString(), 1);
+          confidence = Math.max(0, Math.min(1, score.score || 0.7));
+        } catch (e) {
+          console.warn("Confidence scoring failed:", e.message);
+        }
+
+        claims.push({
+          text: claimText,
+          type: claimType,
+          confidence,
+          sourceType,
+        });
+      }
+    }
+
+    return claims;
+  } catch (e) {
+    console.warn("LLM extraction failed:", e.message);
+    return [];
+  }
 }
 
 // Helper: try Neo4j, fall back to in-memory
@@ -186,39 +247,55 @@ router.post("/ingest/github", async (req, res) => {
       if (isClosed) stats.closedPrs++;
       if (isLeaver) stats.leaverActivities++;
 
-      const claim = {
-        id: `pr-${pr.number}`,
-        type: isMerged ? "merged_pr" : isOpen ? "open_pr" : "closed_pr",
-        text: pr.title,
-        confidence: 0.95,
-        status: isMerged ? "merged" : isOpen ? "open" : "closed",
-        sourceUrl: pr.html_url,
-        sourceType: "pull_request",
-        createdAt: pr.created_at,
-        updatedAt: pr.updated_at,
-        author: pr.user.login,
-        isLeaver: isLeaver,
-        body: pr.body || "",
-        labels: pr.labels.map((l) => l.name),
-        assignees: pr.assignees.map((a) => a.login),
-        reviewers: pr.requested_reviewers.map((r) => r.login),
-        proof: {
-          type: "pull_request",
-          number: pr.number,
-          state: pr.state,
-          merged: isMerged,
-          url: pr.html_url,
+      // Build source text from PR title + body
+      const prText = `${pr.title}\n${pr.body || ""}`;
+
+      // Extract claims using LLM
+      const extractedClaims = await extractClaimsFromText(prText, "pull_request");
+
+      // If LLM extraction failed or returned nothing, create a fallback claim from title
+      if (extractedClaims.length === 0) {
+        extractedClaims.push({
+          text: pr.title,
+          type: isMerged ? "merged_pr" : isOpen ? "open_pr" : "closed_pr",
+          confidence: 0.8,
+          sourceType: "pull_request",
+        });
+      }
+
+      for (const claim of extractedClaims) {
+        await safeCreateClaim({
+          id: `pr-${pr.number}-${claims.length}`,
+          type: claim.type,
+          text: claim.text,
+          confidence: claim.confidence,
+          status: isMerged ? "merged" : isOpen ? "open" : "closed",
+          sourceUrl: pr.html_url,
+          sourceType: "pull_request",
+          createdAt: pr.created_at,
+          updatedAt: pr.updated_at,
           author: pr.user.login,
           isLeaver: isLeaver,
-        },
-      };
-
-      await safeCreateClaim(claim);
+          body: pr.body || "",
+          labels: pr.labels.map((l) => l.name),
+          assignees: pr.assignees.map((a) => a.login),
+          reviewers: pr.requested_reviewers.map((r) => r.login),
+          proof: {
+            type: "pull_request",
+            number: pr.number,
+            state: pr.state,
+            merged: isMerged,
+            url: pr.html_url,
+            author: pr.user.login,
+            isLeaver: isLeaver,
+          },
+        });
+      }
 
       sources.push({
         url: pr.html_url,
         type: "pull_request",
-        content: `${pr.title}\n${pr.body || ""}`,
+        content: prText,
         author: pr.user.login,
       });
 
@@ -229,29 +306,42 @@ router.post("/ingest/github", async (req, res) => {
         if (commentIsLeaver) stats.leaverActivities++;
         stats.totalComments++;
 
-        await safeCreateClaim({
-          id: `pr-comment-${comment.id}`,
-          type: "pr_comment",
-          text: comment.body || "",
-          confidence: 0.9,
-          status: "commented",
-          sourceUrl: comment.html_url || pr.html_url,
-          sourceType: "pull_request_comment",
-          createdAt: comment.created_at,
-          author: comment.user.login,
-          isLeaver: commentIsLeaver,
-          parentPr: pr.number,
-          parentPrTitle: pr.title,
-          proof: {
-            type: "pull_request_comment",
-            commentId: comment.id,
-            prNumber: pr.number,
-            prTitle: pr.title,
+        // Extract claims from comment text
+        const commentClaims = await extractClaimsFromText(comment.body || "", "pull_request_comment");
+        if (commentClaims.length === 0) {
+          commentClaims.push({
+            text: comment.body || "",
+            type: "pr_comment",
+            confidence: 0.8,
+            sourceType: "pull_request_comment",
+          });
+        }
+
+        for (const claim of commentClaims) {
+          await safeCreateClaim({
+            id: `pr-comment-${comment.id}-${claims.length}`,
+            type: claim.type,
+            text: claim.text,
+            confidence: claim.confidence,
+            status: "commented",
+            sourceUrl: comment.html_url || pr.html_url,
+            sourceType: "pull_request_comment",
+            createdAt: comment.created_at,
             author: comment.user.login,
             isLeaver: commentIsLeaver,
-            url: comment.html_url || pr.html_url,
-          },
-        });
+            parentPr: pr.number,
+            parentPrTitle: pr.title,
+            proof: {
+              type: "pull_request_comment",
+              commentId: comment.id,
+              prNumber: pr.number,
+              prTitle: pr.title,
+              author: comment.user.login,
+              isLeaver: commentIsLeaver,
+              url: comment.html_url || pr.html_url,
+            },
+          });
+        }
 
         sources.push({
           url: comment.html_url || pr.html_url,
@@ -272,31 +362,44 @@ router.post("/ingest/github", async (req, res) => {
         if (rcIsLeaver) stats.leaverActivities++;
         stats.totalComments++;
 
-        await safeCreateClaim({
-          id: `pr-review-comment-${rc.id}`,
-          type: "pr_review_comment",
-          text: rc.body || "",
-          confidence: 0.9,
-          status: "reviewed",
-          sourceUrl: rc.html_url || pr.html_url,
-          sourceType: "pull_request_review_comment",
-          createdAt: rc.created_at,
-          author: rc.user.login,
-          isLeaver: rcIsLeaver,
-          parentPr: pr.number,
-          parentPrTitle: pr.title,
-          proof: {
-            type: "pull_request_review_comment",
-            commentId: rc.id,
-            prNumber: pr.number,
-            prTitle: pr.title,
+        // Extract claims from review comment text
+        const reviewClaims = await extractClaimsFromText(rc.body || "", "pull_request_review_comment");
+        if (reviewClaims.length === 0) {
+          reviewClaims.push({
+            text: rc.body || "",
+            type: "pr_review_comment",
+            confidence: 0.8,
+            sourceType: "pull_request_review_comment",
+          });
+        }
+
+        for (const claim of reviewClaims) {
+          await safeCreateClaim({
+            id: `pr-review-comment-${rc.id}-${claims.length}`,
+            type: claim.type,
+            text: claim.text,
+            confidence: claim.confidence,
+            status: "reviewed",
+            sourceUrl: rc.html_url || pr.html_url,
+            sourceType: "pull_request_review_comment",
+            createdAt: rc.created_at,
             author: rc.user.login,
             isLeaver: rcIsLeaver,
-            url: rc.html_url || pr.html_url,
-            path: rc.path,
-            line: rc.line,
-          },
-        });
+            parentPr: pr.number,
+            parentPrTitle: pr.title,
+            proof: {
+              type: "pull_request_review_comment",
+              commentId: rc.id,
+              prNumber: pr.number,
+              prTitle: pr.title,
+              author: rc.user.login,
+              isLeaver: rcIsLeaver,
+              url: rc.html_url || pr.html_url,
+              path: rc.path,
+              line: rc.line,
+            },
+          });
+        }
 
         sources.push({
           url: rc.html_url || pr.html_url,
@@ -319,35 +422,51 @@ router.post("/ingest/github", async (req, res) => {
       if (isClosed) stats.closedIssues++;
       if (isLeaver) stats.leaverActivities++;
 
-      await safeCreateClaim({
-        id: `issue-${issue.number}`,
-        type: isOpen ? "open_issue" : "closed_issue",
-        text: issue.title,
-        confidence: 0.9,
-        status: isOpen ? "open" : "closed",
-        sourceUrl: issue.html_url,
-        sourceType: "issue",
-        createdAt: issue.created_at,
-        updatedAt: issue.updated_at,
-        author: issue.user.login,
-        isLeaver: isLeaver,
-        body: issue.body || "",
-        labels: issue.labels.map((l) => l.name),
-        assignees: issue.assignees.map((a) => a.login),
-        proof: {
-          type: "issue",
-          number: issue.number,
-          state: issue.state,
-          url: issue.html_url,
+      // Build source text from issue title + body
+      const issueText = `${issue.title}\n${issue.body || ""}`;
+
+      // Extract claims using LLM
+      const extractedClaims = await extractClaimsFromText(issueText, "issue");
+      if (extractedClaims.length === 0) {
+        extractedClaims.push({
+          text: issue.title,
+          type: isOpen ? "open_issue" : "closed_issue",
+          confidence: 0.8,
+          sourceType: "issue",
+        });
+      }
+
+      for (const claim of extractedClaims) {
+        await safeCreateClaim({
+          id: `issue-${issue.number}-${claims.length}`,
+          type: claim.type,
+          text: claim.text,
+          confidence: claim.confidence,
+          status: isOpen ? "open" : "closed",
+          sourceUrl: issue.html_url,
+          sourceType: "issue",
+          createdAt: issue.created_at,
+          updatedAt: issue.updated_at,
           author: issue.user.login,
           isLeaver: isLeaver,
-        },
-      });
+          body: issue.body || "",
+          labels: issue.labels.map((l) => l.name),
+          assignees: issue.assignees.map((a) => a.login),
+          proof: {
+            type: "issue",
+            number: issue.number,
+            state: issue.state,
+            url: issue.html_url,
+            author: issue.user.login,
+            isLeaver: isLeaver,
+          },
+        });
+      }
 
       sources.push({
         url: issue.html_url,
         type: "issue",
-        content: `${issue.title}\n${issue.body || ""}`,
+        content: issueText,
         author: issue.user.login,
       });
 
@@ -358,29 +477,42 @@ router.post("/ingest/github", async (req, res) => {
         if (commentIsLeaver) stats.leaverActivities++;
         stats.totalComments++;
 
-        await safeCreateClaim({
-          id: `issue-comment-${comment.id}`,
-          type: "issue_comment",
-          text: comment.body || "",
-          confidence: 0.9,
-          status: "commented",
-          sourceUrl: comment.html_url || issue.html_url,
-          sourceType: "issue_comment",
-          createdAt: comment.created_at,
-          author: comment.user.login,
-          isLeaver: commentIsLeaver,
-          parentIssue: issue.number,
-          parentIssueTitle: issue.title,
-          proof: {
+        // Extract claims from comment text
+        const commentClaims = await extractClaimsFromText(comment.body || "", "issue_comment");
+        if (commentClaims.length === 0) {
+          commentClaims.push({
+            text: comment.body || "",
             type: "issue_comment",
-            commentId: comment.id,
-            issueNumber: issue.number,
-            issueTitle: issue.title,
+            confidence: 0.8,
+            sourceType: "issue_comment",
+          });
+        }
+
+        for (const claim of commentClaims) {
+          await safeCreateClaim({
+            id: `issue-comment-${comment.id}-${claims.length}`,
+            type: claim.type,
+            text: claim.text,
+            confidence: claim.confidence,
+            status: "commented",
+            sourceUrl: comment.html_url || issue.html_url,
+            sourceType: "issue_comment",
+            createdAt: comment.created_at,
             author: comment.user.login,
             isLeaver: commentIsLeaver,
-            url: comment.html_url || issue.html_url,
-          },
-        });
+            parentIssue: issue.number,
+            parentIssueTitle: issue.title,
+            proof: {
+              type: "issue_comment",
+              commentId: comment.id,
+              issueNumber: issue.number,
+              issueTitle: issue.title,
+              author: comment.user.login,
+              isLeaver: commentIsLeaver,
+              url: comment.html_url || issue.html_url,
+            },
+          });
+        }
 
         sources.push({
           url: comment.html_url || issue.html_url,
