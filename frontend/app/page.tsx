@@ -48,8 +48,8 @@ type ActionItem = {
 
 export default function Home() {
   const [view, setView] = useState<"landing" | "dashboard">("landing");
-  const [repoUrl, setRepoUrl] = useState(");
-  const [leaverUsername, setLeaverUsername] = useState(");
+  const [repoUrl, setRepoUrl] = useState("");
+  const [leaverUsername, setLeaverUsername] = useState("");
   const [claims, setClaims] = useState<Claim[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
