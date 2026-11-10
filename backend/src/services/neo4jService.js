@@ -1,23 +1,28 @@
 import { getSession, closeDriver } from "../db/neo4j.js";
-import { neo4jAvailable, setNeo4jAvailable } from "../store.js";
+import { claims, sources, stats } from "../store.js";
 
 /**
  * Neo4j Service - Graph database operations for claims, sources, and stats
- * Falls back gracefully when Neo4j is unavailable
+ * Falls back gracefully to in-memory storage when Neo4j is unavailable
  */
 
 let neo4jConnected = false;
+let connectionAttempted = false;
 
 async function ensureConnection() {
   if (neo4jConnected) return true;
+  if (connectionAttempted && !neo4jConnected) return false;
+
+  connectionAttempted = true;
   try {
     const session = getSession();
     await session.run("RETURN 1");
     await session.close();
     neo4jConnected = true;
+    console.log("Neo4j connected successfully");
     return true;
   } catch (e) {
-    console.warn("Neo4j not available, falling back to in-memory storage:", e.message);
+    console.warn("Neo4j not available, using in-memory storage:", e.message);
     neo4jConnected = false;
     return false;
   }
@@ -27,7 +32,10 @@ async function ensureConnection() {
 
 export async function createClaim(claim) {
   const connected = await ensureConnection();
-  if (!connected) return claim; // Return claim as-is for in-memory fallback
+  if (!connected) {
+    claims.push(claim);
+    return claim;
+  }
 
   const session = getSession();
   try {
@@ -89,17 +97,11 @@ export async function createClaim(claim) {
 export async function getAllClaims(filters = {}) {
   const connected = await ensureConnection();
   if (!connected) {
-    // Fall back to in-memory store
-    import("../store.js").then(({ claims }) => {
-      let filtered = claims;
-      if (filters.status) filtered = filtered.filter((c) => c.status === filters.status);
-      if (filters.type) filtered = filtered.filter((c) => c.type === filters.type);
-      if (filters.isLeaver !== undefined) filtered = filtered.filter((c) => c.isLeaver === filters.isLeaver);
-      return filtered;
-    });
-    // This won't work synchronously, so we need a different approach
-    // For now, return empty array and let the caller handle it
-    return [];
+    let filtered = claims;
+    if (filters.status) filtered = filtered.filter((c) => c.status === filters.status);
+    if (filters.type) filtered = filtered.filter((c) => c.type === filters.type);
+    if (filters.isLeaver !== undefined) filtered = filtered.filter((c) => c.isLeaver === filters.isLeaver);
+    return filtered;
   }
 
   const session = getSession();
@@ -136,7 +138,9 @@ export async function getAllClaims(filters = {}) {
 
 export async function getClaimById(id) {
   const connected = await ensureConnection();
-  if (!connected) return null;
+  if (!connected) {
+    return claims.find((c) => c.id === id) || null;
+  }
 
   const session = getSession();
   try {
@@ -153,7 +157,14 @@ export async function getClaimById(id) {
 
 export async function updateClaim(id, updates) {
   const connected = await ensureConnection();
-  if (!connected) return null;
+  if (!connected) {
+    const claim = claims.find((c) => c.id === id);
+    if (!claim) return null;
+    if (updates.status !== undefined) claim.status = updates.status;
+    if (updates.text !== undefined) claim.text = updates.text;
+    if (updates.confidence !== undefined) claim.confidence = updates.confidence;
+    return claim;
+  }
 
   const session = getSession();
   try {
@@ -188,7 +199,12 @@ export async function updateClaim(id, updates) {
 
 export async function deleteClaim(id) {
   const connected = await ensureConnection();
-  if (!connected) return false;
+  if (!connected) {
+    const index = claims.findIndex((c) => c.id === id);
+    if (index === -1) return false;
+    claims.splice(index, 1);
+    return true;
+  }
 
   const session = getSession();
   try {
@@ -206,7 +222,10 @@ export async function deleteClaim(id) {
 
 export async function createSource(source) {
   const connected = await ensureConnection();
-  if (!connected) return source;
+  if (!connected) {
+    sources.push(source);
+    return source;
+  }
 
   const session = getSession();
   try {
@@ -238,7 +257,7 @@ export async function createSource(source) {
 
 export async function getAllSources() {
   const connected = await ensureConnection();
-  if (!connected) return [];
+  if (!connected) return sources;
 
   const session = getSession();
   try {
@@ -255,12 +274,12 @@ export async function getStats() {
   const connected = await ensureConnection();
   if (!connected) {
     return {
-      totalClaims: 0,
-      openCount: 0,
-      mergedCount: 0,
-      closedCount: 0,
-      leaverActivities: 0,
-      claimTypes: [],
+      totalClaims: claims.length,
+      openCount: claims.filter((c) => c.status === "open").length,
+      mergedCount: claims.filter((c) => c.status === "merged").length,
+      closedCount: claims.filter((c) => c.status === "closed").length,
+      leaverActivities: claims.filter((c) => c.isLeaver).length,
+      claimTypes: [...new Set(claims.map((c) => c.type))],
     };
   }
 
@@ -292,7 +311,15 @@ export async function getStats() {
 
 export async function getActionItems() {
   const connected = await ensureConnection();
-  if (!connected) return [];
+  if (!connected) {
+    return claims.filter(
+      (c) =>
+        c.status === "open" ||
+        c.type === "open_pr" ||
+        c.type === "open_issue" ||
+        (c.type === "pr_review_comment" && c.isLeaver)
+    );
+  }
 
   const session = getSession();
   try {
@@ -313,10 +340,11 @@ export async function getActionItems() {
 export async function getLeaverActivity() {
   const connected = await ensureConnection();
   if (!connected) {
+    const leaverClaims = claims.filter((c) => c.isLeaver);
     return {
-      leaverUsername: null,
-      totalActivities: 0,
-      activities: [],
+      leaverUsername: leaverClaims.length > 0 ? leaverClaims[0].author : null,
+      totalActivities: leaverClaims.length,
+      activities: leaverClaims,
     };
   }
 
@@ -341,7 +369,11 @@ export async function getLeaverActivity() {
 
 export async function clearAllClaims() {
   const connected = await ensureConnection();
-  if (!connected) return;
+  if (!connected) {
+    claims.length = 0;
+    sources.length = 0;
+    return;
+  }
 
   const session = getSession();
   try {
@@ -352,9 +384,12 @@ export async function clearAllClaims() {
   }
 }
 
-export async function bulkCreateClaims(claims) {
+export async function bulkCreateClaims(claimsList) {
   const connected = await ensureConnection();
-  if (!connected) return claims;
+  if (!connected) {
+    claimsList.forEach((c) => claims.push(c));
+    return claimsList;
+  }
 
   const session = getSession();
   try {
@@ -384,7 +419,7 @@ export async function bulkCreateClaims(claims) {
          fileId: claim.fileId
        })
        RETURN c`,
-      { claims }
+      { claims: claimsList }
     );
     return result.records.map((r) => r.get("c").properties);
   } finally {

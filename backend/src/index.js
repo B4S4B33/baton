@@ -8,6 +8,7 @@ import ingestRoute from "./routes/ingest.js";
 import driveRoute from "./routes/drive.js";
 import validateRoute from "./routes/validate.js";
 import { closeDriver } from "./db/neo4j.js";
+import { initSchema, closePool } from "./db/schema.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,6 +48,17 @@ if (fs.existsSync(frontendOutDir)) {
   });
 }
 
+// Initialize database schema on startup
+async function init() {
+  try {
+    await initSchema();
+  } catch (e) {
+    console.warn("Schema initialization skipped:", e.message);
+  }
+}
+
+init();
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
@@ -54,10 +66,12 @@ app.listen(PORT, () => {
 // Graceful shutdown
 process.on("SIGINT", async () => {
   await closeDriver();
+  await closePool();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
   await closeDriver();
+  await closePool();
   process.exit(0);
 });
