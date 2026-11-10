@@ -1,7 +1,87 @@
 import express from "express";
 import fetch from "node-fetch";
+import { extractClaims, scoreConfidence } from "../services/llm.js";
+import { createClaim, createSource, clearAllClaims } from "../services/neo4jService.js";
+import { claims, sources, stats } from "../store.js";
 
 const router = express.Router();
+
+// Map LLM claim types to our claim types
+function mapClaimType(llmType) {
+  const typeMap = {
+    DECISION: "decision",
+    DECISIONS: "decision",
+    OPEN_QUESTION: "question",
+    OPEN_QUESTIONS: "question",
+    TASK: "task",
+    TASKS: "task",
+    DEPENDENCY: "dependency",
+    DEPENDENCIES: "dependency",
+    RISK: "risk",
+    RISKS: "risk",
+    CONTACT: "contact",
+    CONTACTS: "contact",
+  };
+  return typeMap[llmType] || "decision";
+}
+
+// Extract claims from source text using LLM
+async function extractClaimsFromText(text, sourceType) {
+  if (!text || text.trim().length < 10) return [];
+
+  try {
+    const extracted = await extractClaims(text, sourceType);
+    const claims = [];
+
+    for (const [key, value] of Object.entries(extracted)) {
+      if (!Array.isArray(value)) continue;
+
+      for (const item of value) {
+        const claimText = typeof item === "string" ? item : item.text || item.title || JSON.stringify(item);
+        const claimType = mapClaimType(key);
+
+        let confidence = 0.7;
+        try {
+          const score = await scoreConfidence(claimText, sourceType, new Date().toISOString(), 1);
+          confidence = Math.max(0, Math.min(1, score.score || 0.7));
+        } catch (e) {
+          console.warn("Confidence scoring failed:", e.message);
+        }
+
+        claims.push({
+          text: claimText,
+          type: claimType,
+          confidence,
+          sourceType,
+        });
+      }
+    }
+
+    return claims;
+  } catch (e) {
+    console.warn("LLM extraction failed:", e.message);
+    return [];
+  }
+}
+
+// Helper: try Neo4j, fall back to in-memory
+async function safeCreateClaim(claim) {
+  try {
+    return await createClaim(claim);
+  } catch (e) {
+    claims.push(claim);
+    return claim;
+  }
+}
+
+async function safeCreateSource(source) {
+  try {
+    return await createSource(source);
+  } catch (e) {
+    sources.push(source);
+    return source;
+  }
+}
 
 // GET /api/drive/auth-url - Get Google OAuth authorization URL
 router.get("/drive/auth-url", async (req, res) => {
@@ -128,19 +208,59 @@ router.post("/drive/ingest", async (req, res) => {
 
       if (!content.trim()) continue;
 
-      const chunks = content.split(/\n\n+/).filter((c) => c.trim().length > 10);
+      // Extract claims from document content using LLM
+      const extractedClaims = await extractClaimsFromText(content, contentType);
 
-      for (const chunk of chunks) {
+      if (extractedClaims.length === 0) {
+        extractedClaims.push({
+          text: content.substring(0, 200),
+          type: contentType,
+          confidence: 0.7,
+          sourceType: contentType,
+        });
+      }
+
+      for (const claim of extractedClaims) {
+        await safeCreateClaim({
+          id: `drive-${file.id}-${claims.length}`,
+          type: claim.type,
+          text: claim.text,
+          confidence: claim.confidence,
+          status: "proposed",
+          sourceUrl: file.webViewLink,
+          sourceType: "drive_file",
+          createdAt: file.createdTime || file.modifiedTime,
+          author: file.owners?.[0]?.emailAddress || "Unknown",
+          isLeaver: isLeaver,
+          fileName: file.name,
+          fileId: file.id,
+          proof: {
+            type: "google_drive_file",
+            fileId: file.id,
+            fileName: file.name,
+            mimeType: file.mimeType,
+            webViewLink: file.webViewLink,
+            ownerEmail: file.owners?.[0]?.emailAddress,
+            isLeaver: isLeaver,
+          },
+        });
         saved++;
       }
 
-      saved++; // count the file itself
+      sources.push({
+        url: file.webViewLink,
+        type: contentType,
+        content: content.substring(0, 500),
+        author: file.owners?.[0]?.emailAddress || "Unknown",
+        fileName: file.name,
+      });
     }
 
     res.json({
-      message: `Ingested ${docsProcessed} Google Drive documents, ${saved} content chunks`,
+      message: `Ingested ${docsProcessed} Google Drive documents, ${saved} claims extracted`,
       docsProcessed,
       saved,
+      totalClaims: claims.length,
     });
   } catch (e) {
     console.error(e);

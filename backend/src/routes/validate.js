@@ -18,6 +18,48 @@ router.post("/validate", async (req, res) => {
   }
 });
 
+// POST /api/validate/contradictions - Run contradiction detection on all claims
+router.post("/validate/contradictions", async (req, res) => {
+  try {
+    const claims = await getAllClaims();
+    const contradictions = [];
+
+    for (let i = 0; i < claims.length; i++) {
+      for (let j = i + 1; j < claims.length; j++) {
+        const claimA = claims[i];
+        const claimB = claims[j];
+
+        if (claimA.sourceUrl === claimB.sourceUrl || claimA.text.toLowerCase().includes(claimB.text.substring(0, 20))) {
+          try {
+            const result = await detectContradictions(claimA.text, claimB.text, `Sources: ${claimA.sourceUrl} vs ${claimB.sourceUrl}`);
+            if (result.isContradiction && result.confidence > 0.6) {
+              contradictions.push({
+                claimAId: claimA.id,
+                claimBId: claimB.id,
+                claimAText: claimA.text,
+                claimBText: claimB.text,
+                confidence: result.confidence,
+                explanation: result.explanation,
+              });
+            }
+          } catch (e) {
+            console.warn("Contradiction detection failed:", e.message);
+          }
+        }
+      }
+    }
+
+    res.json({
+      contradictions,
+      count: contradictions.length,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/validate/rules - List available validation rules
 router.get("/validate/rules", async (req, res) => {
   res.json({ rules: VALIDATION_RULES });
