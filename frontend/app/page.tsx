@@ -48,8 +48,8 @@ type ActionItem = {
 
 export default function Home() {
   const [view, setView] = useState<"landing" | "dashboard">("landing");
-  const [repoUrl, setRepoUrl] = useState("");
-  const [leaverUsername, setLeaverUsername] = useState("");
+  const [repoUrl, setRepoUrl] = useState(");
+  const [leaverUsername, setLeaverUsername] = useState(");
   const [claims, setClaims] = useState<Claim[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
@@ -77,7 +77,7 @@ export default function Home() {
     setError(null);
 
     try {
-      const res = await fetch("http://localhost:3000/api/ingest/github", {
+      const res = await fetch("/api/ingest/github", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo, leaverUsername: leaverUsername || undefined }),
@@ -91,13 +91,13 @@ export default function Home() {
       setView("dashboard");
 
       // Fetch action items
-      const actionRes = await fetch("http://localhost:3000/api/action-items");
+      const actionRes = await fetch("/api/action-items");
       const actionData = await actionRes.json();
       setActionItems(actionData.actionItems);
 
       // Fetch leaver activity
       if (leaverUsername) {
-        const leaverRes = await fetch("http://localhost:3000/api/leaver-activity");
+        const leaverRes = await fetch("/api/leaver-activity");
         const leaverData = await leaverRes.json();
         setLeaverActivity(leaverData);
       }
@@ -112,7 +112,7 @@ export default function Home() {
     // Load existing claims on mount
     const loadClaims = async () => {
       try {
-        const res = await fetch("http://localhost:3000/api/claims");
+        const res = await fetch("/api/claims");
         const data = await res.json();
         if (data.claims && data.claims.length > 0) {
           setClaims(data.claims);
@@ -631,7 +631,7 @@ export default function Home() {
                         <td style={{ padding: "14px 16px", color: "#334155" }}>
                           <button
                             onClick={() => {
-                              fetch(`http://localhost:3000/api/claims/${item.id}`, {
+                              fetch(`/api/claims/${item.id}`, {
                                 method: "PATCH",
                                 headers: { "Content-Type": "application/json" },
                                 body: JSON.stringify({ status: "accepted" }),
@@ -862,7 +862,7 @@ export default function Home() {
                         <button
                           onClick={() => {
                             const newStatus = claim.status === "accepted" ? "proposed" : "accepted";
-                            fetch(`http://localhost:3000/api/claims/${claim.id}`, {
+                            fetch(`/api/claims/${claim.id}`, {
                               method: "PATCH",
                               headers: { "Content-Type": "application/json" },
                               body: JSON.stringify({ status: newStatus }),

@@ -1,11 +1,13 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Knowledge Handover Backend API",
+  "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "install:all": "npm install && cd ../frontend && npm install && cd ../backend && npm run build:frontend",
+    "build:frontend": "cd ../frontend && npm run build"
   },
   "keywords": [],
   "author": "",

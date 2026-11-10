@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: knowledge-handover-backend
+    name: knowledge-handover
     env: node
     rootDirectory: backend
-    buildCommand: npm install
+    buildCommand: npm run install:all
     startCommand: node src/index.js
     envVars:
       - key: NODE_VERSION
