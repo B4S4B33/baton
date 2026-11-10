@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: knowledge-handover-backend
+    env: node
+    rootDirectory: backend
+    buildCommand: npm install
+    startCommand: node src/index.js
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
+    plan: free

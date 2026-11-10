@@ -1,16 +1,12 @@
 {
-  "name": "codewithpune",
+  "name": "knowledge-handover",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "directories": {
-    "doc": "docs"
-  },
+  "description": "Knowledge Handover Platform - Backend API",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "cd backend && node src/index.js",
+    "install": "cd backend && npm install"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs"
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

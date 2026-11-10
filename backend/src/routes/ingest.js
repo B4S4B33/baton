@@ -1,22 +1,19 @@
 import express from "express";
 import fetch from "node-fetch";
+import {
+  createClaim,
+  createSource,
+  getAllClaims,
+  getStats,
+  getActionItems,
+  getLeaverActivity,
+  updateClaim,
+  clearAllClaims,
+  bulkCreateClaims,
+} from "../services/neo4jService.js";
+import { claims, sources, stats, neo4jAvailable } from "../store.js";
 
 const router = express.Router();
-
-// In-memory storage
-let claims = [];
-let sources = [];
-let stats = {
-  totalPrs: 0,
-  mergedPrs: 0,
-  openPrs: 0,
-  closedPrs: 0,
-  totalIssues: 0,
-  openIssues: 0,
-  closedIssues: 0,
-  totalComments: 0,
-  leaverActivities: 0,
-};
 
 const GITHUB_BASE = "https://api.github.com";
 
@@ -35,12 +32,11 @@ async function fetchAllPages(url, headers, perPage = 100) {
 
     allItems.push(...items);
 
-    // Check for next page via Link header
     const linkHeader = res.headers.get("link");
     if (!linkHeader || !linkHeader.includes('rel="next"')) break;
 
     page++;
-    if (page > 10) break; // safety limit
+    if (page > 10) break;
   }
 
   return allItems;
@@ -51,6 +47,84 @@ async function fetchComments(commentsUrl, headers) {
   const res = await fetch(commentsUrl, { headers });
   if (!res.ok) return [];
   return await res.json();
+}
+
+// Helper: try Neo4j, fall back to in-memory
+async function safeCreateClaim(claim) {
+  try {
+    return await createClaim(claim);
+  } catch (e) {
+    claims.push(claim);
+    return claim;
+  }
+}
+
+async function safeCreateSource(source) {
+  try {
+    return await createSource(source);
+  } catch (e) {
+    sources.push(source);
+    return source;
+  }
+}
+
+async function safeGetAllClaims(filters = {}) {
+  try {
+    return await getAllClaims(filters);
+  } catch (e) {
+    let filtered = claims;
+    if (filters.status) filtered = filtered.filter((c) => c.status === filters.status);
+    if (filters.type) filtered = filtered.filter((c) => c.type === filters.type);
+    if (filters.isLeaver !== undefined) filtered = filtered.filter((c) => c.isLeaver === filters.isLeaver);
+    return filtered;
+  }
+}
+
+async function safeGetStats() {
+  try {
+    return await getStats();
+  } catch (e) {
+    return stats;
+  }
+}
+
+async function safeGetActionItems() {
+  try {
+    return await getActionItems();
+  } catch (e) {
+    return claims.filter(
+      (c) =>
+        c.status === "open" ||
+        c.type === "open_pr" ||
+        c.type === "open_issue" ||
+        (c.type === "pr_review_comment" && c.isLeaver)
+    );
+  }
+}
+
+async function safeGetLeaverActivity() {
+  try {
+    return await getLeaverActivity();
+  } catch (e) {
+    const leaverClaims = claims.filter((c) => c.isLeaver);
+    return {
+      leaverUsername: leaverClaims.length > 0 ? leaverClaims[0].author : null,
+      totalActivities: leaverClaims.length,
+      activities: leaverClaims,
+    };
+  }
+}
+
+async function safeUpdateClaim(id, updates) {
+  try {
+    return await updateClaim(id, updates);
+  } catch (e) {
+    const claim = claims.find((c) => c.id === id);
+    if (!claim) return null;
+    if (updates.status !== undefined) claim.status = updates.status;
+    if (updates.text !== undefined) claim.text = updates.text;
+    return claim;
+  }
 }
 
 // POST /api/ingest/github
@@ -65,9 +139,9 @@ router.post("/ingest/github", async (req, res) => {
   if (token) headers.Authorization = `Bearer ${token}`;
 
   try {
-    // Reset state
-    claims = [];
-    sources = [];
+    // Clear previous data
+    claims.length = 0;
+    sources.length = 0;
     stats = {
       totalPrs: 0,
       mergedPrs: 0,
@@ -80,13 +154,19 @@ router.post("/ingest/github", async (req, res) => {
       leaverActivities: 0,
     };
 
+    try {
+      await clearAllClaims();
+    } catch (e) {
+      // Ignore if Neo4j is down
+    }
+
     // Fetch all PRs (all states)
     const prs = await fetchAllPages(
       `${GITHUB_BASE}/repos/${repo}/pulls?state=all`,
       headers
     );
 
-    // Fetch all issues (all states, exclude PRs since GitHub includes them in issues)
+    // Fetch all issues (all states, exclude PRs)
     const issues = await fetchAllPages(
       `${GITHUB_BASE}/repos/${repo}/issues?state=all`,
       headers
@@ -106,8 +186,7 @@ router.post("/ingest/github", async (req, res) => {
       if (isClosed) stats.closedPrs++;
       if (isLeaver) stats.leaverActivities++;
 
-      // Create claim for PR
-      claims.push({
+      const claim = {
         id: `pr-${pr.number}`,
         type: isMerged ? "merged_pr" : isOpen ? "open_pr" : "closed_pr",
         text: pr.title,
@@ -132,7 +211,9 @@ router.post("/ingest/github", async (req, res) => {
           author: pr.user.login,
           isLeaver: isLeaver,
         },
-      });
+      };
+
+      await safeCreateClaim(claim);
 
       sources.push({
         url: pr.html_url,
@@ -141,17 +222,14 @@ router.post("/ingest/github", async (req, res) => {
         author: pr.user.login,
       });
 
-      // Fetch PR comments (review comments)
-      const prComments = await fetchComments(
-        pr.comments_url,
-        headers
-      );
+      // Fetch PR comments
+      const prComments = await fetchComments(pr.comments_url, headers);
       for (const comment of prComments) {
         const commentIsLeaver = comment.user.login === leaverUsername;
         if (commentIsLeaver) stats.leaverActivities++;
         stats.totalComments++;
 
-        claims.push({
+        await safeCreateClaim({
           id: `pr-comment-${comment.id}`,
           type: "pr_comment",
           text: comment.body || "",
@@ -184,7 +262,7 @@ router.post("/ingest/github", async (req, res) => {
         });
       }
 
-      // Fetch PR review comments (review threads)
+      // Fetch PR review comments
       const reviewComments = await fetchAllPages(
         `${GITHUB_BASE}/repos/${repo}/pulls/${pr.number}/comments`,
         headers
@@ -194,7 +272,7 @@ router.post("/ingest/github", async (req, res) => {
         if (rcIsLeaver) stats.leaverActivities++;
         stats.totalComments++;
 
-        claims.push({
+        await safeCreateClaim({
           id: `pr-review-comment-${rc.id}`,
           type: "pr_review_comment",
           text: rc.body || "",
@@ -241,7 +319,7 @@ router.post("/ingest/github", async (req, res) => {
       if (isClosed) stats.closedIssues++;
       if (isLeaver) stats.leaverActivities++;
 
-      claims.push({
+      await safeCreateClaim({
         id: `issue-${issue.number}`,
         type: isOpen ? "open_issue" : "closed_issue",
         text: issue.title,
@@ -274,16 +352,13 @@ router.post("/ingest/github", async (req, res) => {
       });
 
       // Fetch issue comments
-      const issueComments = await fetchComments(
-        issue.comments_url,
-        headers
-      );
+      const issueComments = await fetchComments(issue.comments_url, headers);
       for (const comment of issueComments) {
         const commentIsLeaver = comment.user.login === leaverUsername;
         if (commentIsLeaver) stats.leaverActivities++;
         stats.totalComments++;
 
-        claims.push({
+        await safeCreateClaim({
           id: `issue-comment-${comment.id}`,
           type: "issue_comment",
           text: comment.body || "",
@@ -320,7 +395,7 @@ router.post("/ingest/github", async (req, res) => {
     res.json({
       message: `Ingested ${prs.length} PRs and ${pureIssues.length} issues from ${repo}`,
       stats,
-      claims: claims.slice(0, 50), // return first 50 for preview
+      claims: claims.slice(0, 50),
       totalClaims: claims.length,
       leaverUsername: leaverUsername || null,
     });
@@ -333,57 +408,49 @@ router.post("/ingest/github", async (req, res) => {
 // GET /api/claims - return all claims with optional filtering
 router.get("/claims", async (req, res) => {
   const { status, type, leaver } = req.query;
-  let filtered = claims;
+  const filters = {};
+  if (status) filters.status = status;
+  if (type) filters.type = type;
+  if (leaver !== undefined) filters.isLeaver = leaver === "true";
 
-  if (status) filtered = filtered.filter((c) => c.status === status);
-  if (type) filtered = filtered.filter((c) => c.type === type);
-  if (leaver) filtered = filtered.filter((c) => c.isLeaver === (leaver === "true"));
+  const claimsList = await safeGetAllClaims(filters);
+  const statsResult = await safeGetStats();
 
   res.json({
-    claims: filtered,
-    total: filtered.length,
-    stats,
+    claims: claimsList,
+    total: claimsList.length,
+    stats: statsResult,
   });
 });
 
 // GET /api/stats
 router.get("/stats", async (req, res) => {
-  res.json({ stats });
+  const statsResult = await safeGetStats();
+  res.json({ stats: statsResult });
 });
 
-// GET /api/leaver-activity - activities by the leaver
+// GET /api/leaver-activity
 router.get("/leaver-activity", async (req, res) => {
-  const leaverClaims = claims.filter((c) => c.isLeaver);
-  res.json({
-    leaverUsername: leaverClaims.length > 0 ? leaverClaims[0].author : null,
-    totalActivities: leaverClaims.length,
-    activities: leaverClaims,
-  });
+  const activity = await safeGetLeaverActivity();
+  res.json(activity);
 });
 
 // PATCH /api/claims/:id
 router.patch("/claims/:id", async (req, res) => {
   const { id } = req.params;
   const { status, text } = req.body;
-  const claim = claims.find((c) => c.id === id);
+  const claim = await safeUpdateClaim(id, { status, text });
+
   if (!claim) {
     return res.status(404).json({ error: "Claim not found" });
   }
-  if (status) claim.status = status;
-  if (text) claim.text = text;
+
   res.json(claim);
 });
 
-// GET /api/action-items - items that need immediate attention
+// GET /api/action-items
 router.get("/action-items", async (req, res) => {
-  const actionItems = claims.filter(
-    (c) =>
-      c.status === "open" ||
-      c.type === "open_pr" ||
-      c.type === "open_issue" ||
-      (c.type === "pr_review_comment" && c.isLeaver)
-  );
-
+  const actionItems = await safeGetActionItems();
   res.json({
     actionItems,
     count: actionItems.length,
