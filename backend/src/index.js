@@ -3,10 +3,14 @@ import express from "express";
 import cors from "cors";
 import path from "path";
 import fs from "fs";
+import { fileURLToPath } from "url";
 import ingestRoute from "./routes/ingest.js";
 import driveRoute from "./routes/drive.js";
 import validateRoute from "./routes/validate.js";
 import { closeDriver } from "./db/neo4j.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = env.PORT || 3000;
