@@ -35,11 +35,14 @@ const frontendOutDir = path.resolve(__dirname, "../../frontend/out");
 if (fs.existsSync(frontendOutDir)) {
   app.use(express.static(frontendOutDir));
   // SPA fallback: serve index.html for any non-API route
-  app.use("*", (req, res) => {
+  app.use((req, res, next) => {
+    if (req.path.startsWith("/api/")) {
+      return next();
+    }
     res.sendFile(path.join(frontendOutDir, "index.html"));
   });
 } else {
-  app.use("*", (req, res) => {
+  app.use((req, res) => {
     res.json({ message: "Frontend not built yet. Build frontend first.", api: "Use /api/* endpoints" });
   });
 }
