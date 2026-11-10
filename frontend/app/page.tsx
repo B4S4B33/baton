@@ -58,6 +58,9 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [validationResults, setValidationResults] = useState<any>(null);
+  const [validationLoading, setValidationLoading] = useState(false);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   const extractRepo = (url: string): string | null => {
     const match = url.match(/github\.com\/([^\/]+)\/([^\/]+?)(?:\.git)?\/?$/);
@@ -105,6 +108,25 @@ export default function Home() {
       setError(e.message || "Failed to ingest data");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const runValidation = async () => {
+    setValidationLoading(true);
+    setValidationError(null);
+    try {
+      const res = await fetch("/api/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ handoverVersionId: "default" }),
+      });
+      if (!res.ok) throw new Error(`Validation failed: ${res.statusText}`);
+      const data = await res.json();
+      setValidationResults(data);
+    } catch (e: any) {
+      setValidationError(e.message || "Validation failed");
+    } finally {
+      setValidationLoading(false);
     }
   };
 
@@ -373,9 +395,124 @@ export default function Home() {
             >
               Refresh Data
             </button>
+            <button
+              onClick={runValidation}
+              disabled={validationLoading}
+              style={{
+                background: validationLoading ? "#94a3b8" : "#10b981",
+                color: "white",
+                border: "none",
+                padding: "10px 20px",
+                borderRadius: "8px",
+                fontSize: "14px",
+                fontWeight: "600",
+                cursor: validationLoading ? "not-allowed" : "pointer",
+              }}
+            >
+              {validationLoading ? "Validating..." : "Run Validation"}
+            </button>
           </div>
         </div>
       </header>
+
+      {/* Validation Results */}
+      {validationResults && (
+        <div
+          style={{
+            maxWidth: "1400px",
+            margin: "0 auto",
+            padding: "0 32px 24px",
+            background: validationResults.passed ? "#f0fdf4" : "#fef2f2",
+            border: `1px solid ${validationResults.passed ? "#bbf7d0" : "#fecaca"}`,
+            borderRadius: "12px",
+            marginBottom: "32px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+            <div
+              style={{
+                width: "32px",
+                height: "32px",
+                background: validationResults.passed ? "#10b981" : "#f59e0b",
+                borderRadius: "8px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "white",
+                fontWeight: "bold",
+              }}
+            >
+              {validationResults.passed ? "✓" : "⚠"}
+            </div>
+            <div>
+              <h2 style={{ fontSize: "18px", fontWeight: "700", color: "#0f172a", margin: 0 }}>
+                Validation Results
+              </h2>
+              <p style={{ fontSize: "14px", color: "#64748b", margin: "4px 0 0" }}>
+                {validationResults.passed
+                  ? "All checks passed. Handover is ready to share."
+                  : `${validationResults.criticalFailures?.length || 0} critical issue(s) found. Review before sharing.`}
+              </p>
+            </div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
+            {validationResults.results.map((r: any) => (
+              <div
+                key={r.id}
+                style={{
+                  background: "white",
+                  borderRadius: "8px",
+                  padding: "16px",
+                  border: `1px solid ${r.status === "fail" ? "#fecaca" : "#bbf7d0"}`,
+                }}
+              >
+                <div style={{ fontSize: "12px", fontWeight: "600", color: "#64748b", textTransform: "uppercase" }}>
+                  {r.name}
+                </div>
+                <div
+                  style={{
+                    fontSize: "14px",
+                    fontWeight: "700",
+                    color: r.status === "fail" ? "#dc2626" : "#15803d",
+                    margin: "8px 0",
+                  }}
+                >
+                  {r.status.toUpperCase()}
+                </div>
+                <div style={{ fontSize: "13px", color: "#475569" }}>{r.detail}</div>
+              </div>
+            ))}
+          </div>
+          {(() => {
+      const contradictionResult = validationResults.results.find(
+        (r: any) => r.type === "contradiction"
+      );
+      return contradictionResult && contradictionResult.contradictions && contradictionResult.contradictions.length > 0;
+    })() && (
+            <div style={{ marginTop: "16px", background: "#fffbeb", border: "1px solid #fde047", borderRadius: "8px", padding: "16px" }}>
+              <div style={{ fontSize: "14px", fontWeight: "700", color: "#713f12", marginBottom: "8px" }}>
+                ⚠ Contradictions Detected
+              </div>
+              {contradictionResult.contradictions.map((c: any) => (
+                <div
+                  key={`${c.claimAId}-${c.claimBId}`}
+                  style={{
+                    background: "white",
+                    borderRadius: "6px",
+                    padding: "12px",
+                    marginBottom: "8px",
+                    fontSize: "13px",
+                  }}
+                >
+                  <div style={{ fontWeight: "600", color: "#0f172a" }}>{c.claimAText}</div>
+                  <div style={{ color: "#64748b", fontSize: "12px", margin: "4px 0" }}>{c.claimBText}</div>
+                  <div style={{ fontSize: "11px", color: "#713f12" }}>{c.explanation}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ maxWidth: "1400px", margin: "0 auto", padding: "32px" }}>
         {/* Stats Row */}
