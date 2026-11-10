@@ -15,3 +15,7 @@ export let stats = {
 
 // Flag to track if Neo4j is available
 export let neo4jAvailable = false;
+
+export function setNeo4vAvailable(val) {
+  neo4jAvailable = val;
+}
