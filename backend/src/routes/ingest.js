@@ -229,7 +229,8 @@ router.post("/ingest/github", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });
-  } }
+  }
+});
 
 router.get("/claims", async (req, res) => {
   const { status, type, leaver } = req.query;
