@@ -50,6 +50,7 @@ export default function Home() {
   const [view, setView] = useState<"landing" | "dashboard">("landing");
   const [repoUrl, setRepoUrl] = useState("");
   const [leaverUsername, setLeaverUsername] = useState("");
+  const [githubToken, setGithubToken] = useState("");
   const [claims, setClaims] = useState<Claim[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [actionItems, setActionItems] = useState<ActionItem[]>([]);
@@ -72,7 +73,7 @@ export default function Home() {
     e.preventDefault();
     const repo = extractRepo(repoUrl);
     if (!repo) {
-      setError("Invalid GitHub repository URL");
+      setError("Invalid GitHub repository URL. Use format: https://github.com/owner/repo");
       return;
     }
 
@@ -83,14 +84,27 @@ export default function Home() {
       const res = await fetch("/api/ingest/github", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo, leaverUsername: leaverUsername || undefined }),
+        body: JSON.stringify({
+          repo,
+          leaverUsername: leaverUsername || undefined,
+          token: githubToken || undefined,
+        }),
       });
 
-      if (!res.ok) throw new Error(`Ingestion failed: ${res.statusText}`);
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
 
-      const data = await res.json();
-      setStats(data.stats);
-      setClaims(data.claims);
+      if (!res.ok) {
+        const detail = data?.details || data?.detail || data?.error || res.statusText;
+        throw new Error(`Ingestion failed: ${detail}`);
+      }
+
+      setStats(data.stats || null);
+      setClaims(Array.isArray(data.claims) ? data.claims : []);
       setView("dashboard");
 
       // Fetch action items
@@ -273,6 +287,30 @@ export default function Home() {
                   boxSizing: "border-box",
                 }}
               />
+            </div>
+
+            <div>
+              <label style={{ display: "block", fontWeight: "600", color: "#334155", marginBottom: "8px", fontSize: "14px" }}>
+                GitHub Token (optional, recommended on Render)
+              </label>
+              <input
+                type="password"
+                placeholder="ghp_... or fine-grained token"
+                value={githubToken}
+                onChange={(e) => setGithubToken(e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "14px 16px",
+                  border: "1px solid #cbd5e1",
+                  borderRadius: "10px",
+                  fontSize: "14px",
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+              <p style={{ marginTop: "6px", fontSize: "12px", color: "#64748b" }}>
+                Used only for this ingest request to avoid GitHub rate limits or private-repo access issues.
+              </p>
             </div>
 
             {error && (
