@@ -91,7 +91,7 @@ async function safeUpdateClaim(id, updates) {
 router.post("/ingest/github", async (req, res) => {
   const { repo, leaverUsername, token } = req.body;
   if (!repo) {
-    return res.status(400).json({ error: "repo is required (format: owner/repo)" };
+    return res.status(400).json({ error: "repo is required (format: owner/repo)" });
   }
   const headers = { Accept: "application/vnd.github+json" };
   if (token) headers.Authorization = "Bearer " + token;
