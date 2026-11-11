@@ -512,7 +512,7 @@ export default function Home() {
                   <div style={{ color: "#64748b", fontSize: "12px", margin: "4px 0" }}>{c.claimBText}</div>
                   <div style={{ fontSize: "11px", color: "#713f12" }}>{c.explanation}</div>
                 </div>
-              ))))
+              )})()
             </div>
           )}
         </div>
