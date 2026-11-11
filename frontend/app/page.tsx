@@ -493,7 +493,11 @@ export default function Home() {
               <div style={{ fontSize: "14px", fontWeight: "700", color: "#713f12", marginBottom: "8px" }}>
                 ⚠ Contradictions Detected
               </div>
-              {contradictionResult.contradictions.map((c: any) => (
+              {(() => {
+                const contradictionResult = validationResults.results.find(
+                  (r: any) => r.type === "contradiction"
+                );
+                return contradictionResult?.contradictions?.map((c: any) => (
                 <div
                   key={`${c.claimAId}-${c.claimBId}`}
                   style={{
@@ -508,7 +512,7 @@ export default function Home() {
                   <div style={{ color: "#64748b", fontSize: "12px", margin: "4px 0" }}>{c.claimBText}</div>
                   <div style={{ fontSize: "11px", color: "#713f12" }}>{c.explanation}</div>
                 </div>
-              ))}
+              ))))
             </div>
           )}
         </div>
