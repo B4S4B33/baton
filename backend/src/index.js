@@ -8,7 +8,8 @@ import ingestRoute from "./routes/ingest.js";
 import driveRoute from "./routes/drive.js";
 import validateRoute from "./routes/validate.js";
 import { closeDriver } from "./db/neo4j.js";
-import { initSchema, closePool } from "./db/schema.js";
+import { initSchema } from "./db/schema.js";
+import { closePool } from "./db/postgres.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

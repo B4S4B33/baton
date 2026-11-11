@@ -1,4 +1,6 @@
-import { query } from "./postgres.js";
+import { query, closePool } from "./postgres.js";
+
+export { closePool };
 
 /**
  * Initialize database tables for the handover platform.
