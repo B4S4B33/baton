@@ -484,37 +484,35 @@ export default function Home() {
             ))}
           </div>
           {(() => {
-      const contradictionResult = validationResults.results.find(
-        (r: any) => r.type === "contradiction"
-      );
-      return contradictionResult && contradictionResult.contradictions && contradictionResult.contradictions.length > 0;
-    })() && (
-            <div style={{ marginTop: "16px", background: "#fffbeb", border: "1px solid #fde047", borderRadius: "8px", padding: "16px" }}>
-              <div style={{ fontSize: "14px", fontWeight: "700", color: "#713f12", marginBottom: "8px" }}>
-                ⚠ Contradictions Detected
-              </div>
-              {(() => {
-                const contradictionResult = validationResults.results.find(
-                  (r: any) => r.type === "contradiction"
-                );
-                return contradictionResult?.contradictions?.map((c: any) => (
-                <div
-                  key={`${c.claimAId}-${c.claimBId}`}
-                  style={{
-                    background: "white",
-                    borderRadius: "6px",
-                    padding: "12px",
-                    marginBottom: "8px",
-                    fontSize: "13px",
-                  }}
-                >
-                  <div style={{ fontWeight: "600", color: "#0f172a" }}>{c.claimAText}</div>
-                  <div style={{ color: "#64748b", fontSize: "12px", margin: "4px 0" }}>{c.claimBText}</div>
-                  <div style={{ fontSize: "11px", color: "#713f12" }}>{c.explanation}</div>
+            const contradictionResult = validationResults.results.find(
+              (r: any) => r.type === "contradiction"
+            );
+            const hasContradictions = contradictionResult && contradictionResult.contradictions && contradictionResult.contradictions.length > 0;
+            if (!hasContradictions) return null;
+            return (
+              <div style={{ marginTop: "16px", background: "#fffbeb", border: "1px solid #fde047", borderRadius: "8px", padding: "16px" }}>
+                <div style={{ fontSize: "14px", fontWeight: "700", color: "#713f12", marginBottom: "8px" }}>
+                  ⚠ Contradictions Detected
                 </div>
-              )})()
-            </div>
-          )}
+                {contradictionResult.contradictions.map((c: any) => (
+                  <div
+                    key={`${c.claimAId}-${c.claimBId}`}
+                    style={{
+                      background: "white",
+                      borderRadius: "6px",
+                      padding: "12px",
+                      marginBottom: "8px",
+                      fontSize: "13px",
+                    }}
+                  >
+                    <div style={{ fontWeight: "600", color: "#0f172a" }}>{c.claimAText}</div>
+                    <div style={{ color: "#64748b", fontSize: "12px", margin: "4px 0" }}>{c.claimBText}</div>
+                    <div style={{ fontSize: "11px", color: "#713f12" }}>{c.explanation}</div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </div>
       )}
 
