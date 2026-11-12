@@ -9,6 +9,7 @@ import {
   updateClaim,
   clearAllClaims,
 } from "../services/neo4jService.js";
+import { extractClaims, isLLMEnabled } from "../services/llm.js";
 import { claims, sources, stats } from "../store.js";
 
 const router = express.Router();
@@ -80,6 +81,84 @@ async function fetchComments(commentsUrl, headers) {
   } catch (e) {
     console.warn(`Error fetching comments ${commentsUrl}: ${e.message}`);
     return [];
+  }
+}
+
+function mapExtractedCategory(category) {
+  const map = {
+    decisions: "decision",
+    openQuestions: "question",
+    tasks: "task",
+    dependencies: "dependency",
+    risks: "risk",
+    contacts: "contact",
+  };
+  return map[category] || "insight";
+}
+
+async function enrichClaimsFromText({
+  text,
+  sourceType,
+  sourceUrl,
+  createdAt,
+  updatedAt,
+  author,
+  isLeaver,
+  parentPr = null,
+  parentPrTitle = null,
+  parentIssue = null,
+  parentIssueTitle = null,
+  responseClaims,
+}) {
+  if (!isLLMEnabled()) return;
+  const content = typeof text === "string" ? text.trim() : "";
+  if (content.length < 20) return;
+
+  let extracted;
+  try {
+    extracted = await extractClaims(content, sourceType);
+  } catch (e) {
+    console.warn(`LLM extractClaims failed for ${sourceType} ${sourceUrl}: ${e.message}`);
+    return;
+  }
+
+  for (const [category, items] of Object.entries(extracted || {})) {
+    if (!Array.isArray(items) || items.length === 0) continue;
+    const claimType = mapExtractedCategory(category);
+
+    for (const item of items) {
+      const claimText = typeof item === "string" ? item.trim() : String(item?.text || item || "").trim();
+      if (!claimText) continue;
+
+      const enrichedClaim = {
+        id: `llm-${sourceType}-${responseClaims.length}-${Math.random().toString(36).slice(2, 7)}`,
+        type: claimType,
+        text: claimText,
+        confidence: 0.7,
+        status: "proposed",
+        sourceUrl,
+        sourceType,
+        createdAt,
+        updatedAt: updatedAt || createdAt,
+        author: author || "unknown",
+        isLeaver: Boolean(isLeaver),
+        parentPr,
+        parentPrTitle,
+        parentIssue,
+        parentIssueTitle,
+        proof: {
+          type: "llm_extracted_claim",
+          category,
+          sourceArtifactType: sourceType,
+          sourceUrl,
+          parentPr,
+          parentIssue,
+        },
+      };
+
+      await safeCreateClaim(enrichedClaim);
+      responseClaims.push(enrichedClaim);
+    }
   }
 }
 
@@ -212,6 +291,19 @@ router.post("/ingest/github", async (req, res) => {
         content: (pr.title || "") + "\n" + (pr.body || ""), author: pr.user?.login || "unknown",
       });
 
+      await enrichClaimsFromText({
+        text: (pr.title || "") + "\n" + (pr.body || ""),
+        sourceType: "pull_request",
+        sourceUrl: pr.html_url,
+        createdAt: pr.created_at,
+        updatedAt: pr.updated_at,
+        author: pr.user?.login || "unknown",
+        isLeaver,
+        parentPr: pr.number,
+        parentPrTitle: pr.title,
+        responseClaims,
+      });
+
       const prComments = await fetchComments(pr.comments_url, headers);
       for (const comment of prComments) {
         const commentIsLeaver = normalizedLeaver ? comment.user?.login === normalizedLeaver : false;
@@ -300,6 +392,19 @@ router.post("/ingest/github", async (req, res) => {
         content: (issue.title || "") + "\n" + (issue.body || ""), author: issue.user?.login || "unknown",
       });
 
+      await enrichClaimsFromText({
+        text: (issue.title || "") + "\n" + (issue.body || ""),
+        sourceType: "issue",
+        sourceUrl: issue.html_url,
+        createdAt: issue.created_at,
+        updatedAt: issue.updated_at,
+        author: issue.user?.login || "unknown",
+        isLeaver,
+        parentIssue: issue.number,
+        parentIssueTitle: issue.title,
+        responseClaims,
+      });
+
       const issueComments = await fetchComments(issue.comments_url, headers);
       for (const comment of issueComments) {
         const commentIsLeaver = normalizedLeaver ? comment.user?.login === normalizedLeaver : false;
@@ -338,6 +443,7 @@ router.post("/ingest/github", async (req, res) => {
         issuesFetched: issues.length,
         pureIssuesFetched: pureIssues.length,
         usedGitHubToken: Boolean(token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN),
+        llmEnrichmentEnabled: isLLMEnabled(),
       },
     });
   } catch (e) {

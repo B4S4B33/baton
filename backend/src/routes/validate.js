@@ -1,6 +1,7 @@
 import express from "express";
 import { runValidationGate, VALIDATION_RULES } from "../services/validationGate.js";
-import { getAllClaims, updateClaim } from "../services/neo4jService.js";
+import { detectContradictions } from "../services/llm.js";
+import { getAllClaims } from "../services/neo4jService.js";
 
 const router = express.Router();
 

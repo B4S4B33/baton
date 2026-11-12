@@ -16,9 +16,19 @@ async function ensureConnection() {
   if (connectionAttempted && !pgConnected) return false;
 
   connectionAttempted = true;
+  if (!env.DATABASE_URL) {
+    console.warn("PostgreSQL not available: DATABASE_URL is not set");
+    pgConnected = false;
+    pool = null;
+    return false;
+  }
+
   try {
+    const connectionString = env.DATABASE_URL;
+    const isLocal = /localhost|127\.0\.0\.1/i.test(connectionString);
     pool = new Pool({
-      connectionString: env.DATABASE_URL,
+      connectionString,
+      ...(!isLocal ? { ssl: { rejectUnauthorized: false } } : {}),
     });
     // Test the connection
     await pool.query("SELECT 1");
@@ -28,6 +38,9 @@ async function ensureConnection() {
   } catch (e) {
     console.warn("PostgreSQL not available:", e.message);
     pgConnected = false;
+    if (pool) {
+      try { await pool.end(); } catch (_) {}
+    }
     pool = null;
     return false;
   }

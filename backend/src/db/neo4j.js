@@ -3,54 +3,36 @@ import { env } from "../config.js";
 
 /**
  * Neo4j driver configuration.
- * Tries multiple TLS configurations to connect to Neo4j 4.x or 5.x.
+ * Uses URI scheme to determine encryption/TLS (e.g. neo4j+s:// for Aura).
+ * For local bolt:// URIs without explicit scheme encryption, encryption is disabled.
  */
 let driver = null;
 
 function createDriver() {
-  // Try encrypted: false first (Neo4j 4.x default)
-  try {
-    return neo4j.driver(
-      env.NEO4J_URI,
-      neo4j.auth.basic(env.NEO4J_USER, env.NEO4J_PASSWORD),
-      { encrypted: false }
-    );
-  } catch (e) {
-    // Fall through to next option
+  if (!env.NEO4J_URI) return null;
+
+  const auth = neo4j.auth.basic(env.NEO4J_USER, env.NEO4J_PASSWORD);
+  const uri = env.NEO4J_URI;
+
+  // Cloud/Aura URIs typically encode encryption in the scheme (neo4j+s, neo4j+ssc, bolt+s, bolt+ssc)
+  if (/^(neo4j\+s|neo4j\+ssc|bolt\+s|bolt\+ssc):\/\//i.test(uri)) {
+    return neo4j.driver(uri, auth);
   }
 
-  // Try tls: 'OPTIONAL' (Neo4j 5.x default)
-  try {
-    return neo4j.driver(
-      env.NEO4J_URI,
-      neo4j.auth.basic(env.NEO4J_USER, env.NEO4J_PASSWORD),
-      { tls: 'OPTIONAL' }
-    );
-  } catch (e) {
-    // Fall through to next option
+  // Local development convenience: disable encryption for plain bolt://localhost unless explicitly configured
+  if (/^bolt:\/\//i.test(uri) && /localhost|127\.0\.0\.1/i.test(uri)) {
+    return neo4j.driver(uri, auth, { encrypted: "ENCRYPTION_OFF" });
   }
 
-  // Try tls: 'DISABLED'
-  try {
-    return neo4j.driver(
-      env.NEO4J_URI,
-      neo4j.auth.basic(env.NEO4J_USER, env.NEO4J_PASSWORD),
-      { tls: 'DISABLED' }
-    );
-  } catch (e) {
-    // Fall through
-  }
-
-  // Last resort: no extra options
-  return neo4j.driver(
-    env.NEO4J_URI,
-    neo4j.auth.basic(env.NEO4J_USER, env.NEO4J_PASSWORD)
-  );
+  return neo4j.driver(uri, auth);
 }
 
 driver = createDriver();
 
-export const getSession = () => driver.session();
+export const getSession = () => {
+  if (!driver) throw new Error("Neo4j driver not initialized (NEO4J_URI not set)");
+  return driver.session();
+};
 
 export const closeDriver = async () => {
   if (driver) {

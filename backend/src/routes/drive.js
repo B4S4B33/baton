@@ -8,9 +8,12 @@ const router = express.Router();
 
 // Map LLM claim types to our claim types
 function mapClaimType(llmType) {
+  const key = String(llmType || "").toUpperCase();
   const typeMap = {
     DECISION: "decision",
     DECISIONS: "decision",
+    OPENQUESTION: "question",
+    OPENQUESTIONS: "question",
     OPEN_QUESTION: "question",
     OPEN_QUESTIONS: "question",
     TASK: "task",
@@ -22,7 +25,7 @@ function mapClaimType(llmType) {
     CONTACT: "contact",
     CONTACTS: "contact",
   };
-  return typeMap[llmType] || "decision";
+  return typeMap[key] || "decision";
 }
 
 // Extract claims from source text using LLM

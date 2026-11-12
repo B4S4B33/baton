@@ -186,16 +186,21 @@ async function recalculateConfidence() {
         1 // corroboration count - could be enhanced
       );
 
-      if (scoreResult.score < 0.5) {
+      const score = typeof scoreResult?.score === "number" ? scoreResult.score : 0.5;
+      if (score < 0.5) {
         lowConfidence.push({
           claimId: claim.id,
           claimText: claim.text,
-          score: scoreResult.score,
-          reasoning: scoreResult.reasoning,
+          score,
+          reasoning: scoreResult?.reasoning || "Low confidence",
         });
 
-        // Update the claim's confidence in Neo4j
-        await updateClaim(claim.id, { confidence: scoreResult.score });
+        // Update the claim's confidence in storage
+        try {
+          await updateClaim(claim.id, { confidence: score });
+        } catch (e) {
+          // Non-fatal: storage update may fail in fallback environments
+        }
       }
     } catch (e) {
       // Skip if LLM is unavailable
