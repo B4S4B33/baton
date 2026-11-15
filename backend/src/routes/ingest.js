@@ -14,6 +14,10 @@ import { claims, sources, stats } from "../store.js";
 
 const router = express.Router();
 const GITHUB_BASE = "https://api.github.com";
+const GITHUB_TIMEOUT_MS = Number(process.env.GITHUB_TIMEOUT_MS) || 15000;
+const GITHUB_MAX_PAGES = Number(process.env.GITHUB_MAX_PAGES) || 5;
+const MAX_LLM_ENRICHMENTS = Number(process.env.MAX_LLM_ENRICHMENTS) || 20;
+const LLM_ENRICHMENT_CONCURRENCY = Number(process.env.LLM_ENRICHMENT_CONCURRENCY) || 3;
 
 function githubHeaders(token) {
   const headers = {
@@ -23,6 +27,23 @@ function githubHeaders(token) {
   const resolvedToken = token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   if (resolvedToken) headers.Authorization = "Bearer " + resolvedToken;
   return headers;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = GITHUB_TIMEOUT_MS, label = "Request") {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      const err = new Error(`${label} timed out after ${timeoutMs}ms: ${url}`);
+      err.status = 504;
+      throw err;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function readGitHubError(res) {
@@ -41,13 +62,13 @@ async function readGitHubError(res) {
   }
 }
 
-async function fetchAllPages(url, headers, perPage = 100) {
+async function fetchAllPages(url, headers, perPage = 100, maxPages = GITHUB_MAX_PAGES) {
   const allItems = [];
   let page = 1;
-  while (true) {
+  while (page <= maxPages) {
     const sep = url.includes("?") ? "&" : "?";
     const paginatedUrl = url + sep + "per_page=" + perPage + "&page=" + page;
-    const res = await fetch(paginatedUrl, { headers });
+    const res = await fetchWithTimeout(paginatedUrl, { headers }, GITHUB_TIMEOUT_MS, "GitHub API request");
     if (!res.ok) {
       const detail = await readGitHubError(res);
       const err = new Error(`GitHub API ${res.status} for ${paginatedUrl}: ${detail}`);
@@ -63,7 +84,6 @@ async function fetchAllPages(url, headers, perPage = 100) {
     const linkHeader = res.headers.get("link");
     if (!linkHeader || !linkHeader.includes('rel="next"')) break;
     page++;
-    if (page > 10) break;
   }
   return allItems;
 }
@@ -71,7 +91,7 @@ async function fetchAllPages(url, headers, perPage = 100) {
 async function fetchComments(commentsUrl, headers) {
   if (!commentsUrl) return [];
   try {
-    const res = await fetch(commentsUrl, { headers });
+    const res = await fetchWithTimeout(commentsUrl, { headers }, GITHUB_TIMEOUT_MS, "GitHub comments request");
     if (!res.ok) {
       console.warn(`Failed to fetch comments ${commentsUrl}: ${res.status}`);
       return [];
@@ -109,19 +129,29 @@ async function enrichClaimsFromText({
   parentIssue = null,
   parentIssueTitle = null,
   responseClaims,
+  counters,
 }) {
   if (!isLLMEnabled()) return;
+  if (counters && counters.llmEnrichmentAttempted >= MAX_LLM_ENRICHMENTS) {
+    if (counters) counters.llmEnrichmentSkippedCap++;
+    return;
+  }
+
   const content = typeof text === "string" ? text.trim() : "";
   if (content.length < 20) return;
+
+  if (counters) counters.llmEnrichmentAttempted++;
 
   let extracted;
   try {
     extracted = await extractClaims(content, sourceType);
   } catch (e) {
+    if (counters) counters.llmEnrichmentErrors++;
     console.warn(`LLM extractClaims failed for ${sourceType} ${sourceUrl}: ${e.message}`);
     return;
   }
 
+  let added = 0;
   for (const [category, items] of Object.entries(extracted || {})) {
     if (!Array.isArray(items) || items.length === 0) continue;
     const claimType = mapExtractedCategory(category);
@@ -131,7 +161,7 @@ async function enrichClaimsFromText({
       if (!claimText) continue;
 
       const enrichedClaim = {
-        id: `llm-${sourceType}-${responseClaims.length}-${Math.random().toString(36).slice(2, 7)}`,
+        id: `llm-${sourceType}-${Date.now()}-${responseClaims.length}-${Math.random().toString(36).slice(2, 7)}`,
         type: claimType,
         text: claimText,
         confidence: 0.7,
@@ -158,8 +188,29 @@ async function enrichClaimsFromText({
 
       await safeCreateClaim(enrichedClaim);
       responseClaims.push(enrichedClaim);
+      added++;
     }
   }
+
+  if (counters && added > 0) counters.llmClaimsCreated += added;
+}
+
+async function runWithConcurrency(tasks, concurrency = LLM_ENRICHMENT_CONCURRENCY) {
+  const results = [];
+  let index = 0;
+  async function worker() {
+    while (index < tasks.length) {
+      const i = index++;
+      try {
+        results[i] = await tasks[i]();
+      } catch (e) {
+        results[i] = { error: e };
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, tasks.length || 1) }, () => worker());
+  await Promise.all(workers);
+  return results;
 }
 
 async function safeCreateClaim(claim) {
@@ -223,7 +274,8 @@ async function safeUpdateClaim(id, updates) {
   } }
 
 router.post("/ingest/github", async (req, res) => {
-  const { repo, leaverUsername, token } = req.body;
+  const startedAt = Date.now();
+  const { repo, leaverUsername, token } = req.body || {};
   if (!repo || typeof repo !== "string" || !/^[^/\s]+\/[^/\s]+$/.test(repo.trim())) {
     return res.status(400).json({ error: "repo is required in owner/repo format" });
   }
@@ -232,8 +284,17 @@ router.post("/ingest/github", async (req, res) => {
   const normalizedLeaver = typeof leaverUsername === "string" && leaverUsername.trim() ? leaverUsername.trim() : null;
   const headers = githubHeaders(token);
   const responseClaims = [];
+  const enrichmentTasks = [];
+  const enrichmentCounters = {
+    llmEnrichmentAttempted: 0,
+    llmEnrichmentErrors: 0,
+    llmClaimsCreated: 0,
+    llmEnrichmentSkippedCap: 0,
+  };
+  const fetchWarnings = [];
 
   try {
+    console.log(`[ingest/github] start repo=${normalizedRepo} leaver=${normalizedLeaver || "-"} llm=${isLLMEnabled()} token=${Boolean(token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN)}`);
     claims.length = 0;
     sources.length = 0;
     Object.assign(stats, {
@@ -244,11 +305,13 @@ router.post("/ingest/github", async (req, res) => {
 
     try { await clearAllClaims(); } catch (e) {
       console.warn("Failed to clear existing claims before ingest:", e.message);
+      fetchWarnings.push(`clearAllClaims: ${e.message}`);
     }
 
     const prs = await fetchAllPages(GITHUB_BASE + "/repos/" + normalizedRepo + "/pulls?state=all", headers);
     const issues = await fetchAllPages(GITHUB_BASE + "/repos/" + normalizedRepo + "/issues?state=all", headers);
     const pureIssues = issues.filter((i) => !i.pull_request);
+    console.log(`[ingest/github] fetched repo=${normalizedRepo} prs=${prs.length} issues=${issues.length} pureIssues=${pureIssues.length}`);
 
     for (const pr of prs) {
       const isLeaver = normalizedLeaver ? pr.user.login === normalizedLeaver : false;
@@ -291,18 +354,21 @@ router.post("/ingest/github", async (req, res) => {
         content: (pr.title || "") + "\n" + (pr.body || ""), author: pr.user?.login || "unknown",
       });
 
-      await enrichClaimsFromText({
-        text: (pr.title || "") + "\n" + (pr.body || ""),
-        sourceType: "pull_request",
-        sourceUrl: pr.html_url,
-        createdAt: pr.created_at,
-        updatedAt: pr.updated_at,
-        author: pr.user?.login || "unknown",
-        isLeaver,
-        parentPr: pr.number,
-        parentPrTitle: pr.title,
-        responseClaims,
-      });
+      if (isLLMEnabled() && enrichmentTasks.length < MAX_LLM_ENRICHMENTS) {
+        enrichmentTasks.push(() => enrichClaimsFromText({
+          text: (pr.title || "") + "\n" + (pr.body || ""),
+          sourceType: "pull_request",
+          sourceUrl: pr.html_url,
+          createdAt: pr.created_at,
+          updatedAt: pr.updated_at,
+          author: pr.user?.login || "unknown",
+          isLeaver,
+          parentPr: pr.number,
+          parentPrTitle: pr.title,
+          responseClaims,
+          counters: enrichmentCounters,
+        }));
+      }
 
       const prComments = await fetchComments(pr.comments_url, headers);
       for (const comment of prComments) {
@@ -332,9 +398,10 @@ router.post("/ingest/github", async (req, res) => {
       let reviewComments = [];
       try {
         reviewComments = await fetchAllPages(
-          GITHUB_BASE + "/repos/" + normalizedRepo + "/pulls/" + pr.number + "/comments", headers);
+          GITHUB_BASE + "/repos/" + normalizedRepo + "/pulls/" + pr.number + "/comments", headers, 100, 3);
       } catch (e) {
         console.warn(`Failed to fetch review comments for PR #${pr.number}: ${e.message}`);
+        fetchWarnings.push(`PR #${pr.number} review comments: ${e.message}`);
       }
       for (const rc of reviewComments) {
         const rcIsLeaver = normalizedLeaver ? rc.user?.login === normalizedLeaver : false;
@@ -392,18 +459,21 @@ router.post("/ingest/github", async (req, res) => {
         content: (issue.title || "") + "\n" + (issue.body || ""), author: issue.user?.login || "unknown",
       });
 
-      await enrichClaimsFromText({
-        text: (issue.title || "") + "\n" + (issue.body || ""),
-        sourceType: "issue",
-        sourceUrl: issue.html_url,
-        createdAt: issue.created_at,
-        updatedAt: issue.updated_at,
-        author: issue.user?.login || "unknown",
-        isLeaver,
-        parentIssue: issue.number,
-        parentIssueTitle: issue.title,
-        responseClaims,
-      });
+      if (isLLMEnabled() && enrichmentTasks.length < MAX_LLM_ENRICHMENTS) {
+        enrichmentTasks.push(() => enrichClaimsFromText({
+          text: (issue.title || "") + "\n" + (issue.body || ""),
+          sourceType: "issue",
+          sourceUrl: issue.html_url,
+          createdAt: issue.created_at,
+          updatedAt: issue.updated_at,
+          author: issue.user?.login || "unknown",
+          isLeaver,
+          parentIssue: issue.number,
+          parentIssueTitle: issue.title,
+          responseClaims,
+          counters: enrichmentCounters,
+        }));
+      }
 
       const issueComments = await fetchComments(issue.comments_url, headers);
       for (const comment of issueComments) {
@@ -431,6 +501,27 @@ router.post("/ingest/github", async (req, res) => {
       }
     }
 
+    if (enrichmentTasks.length > 0) {
+      console.log(`[ingest/github] running LLM enrichment repo=${normalizedRepo} tasks=${enrichmentTasks.length} concurrency=${LLM_ENRICHMENT_CONCURRENCY}`);
+      await runWithConcurrency(enrichmentTasks, LLM_ENRICHMENT_CONCURRENCY);
+    }
+
+    const diagnostics = {
+      prsFetched: prs.length,
+      issuesFetched: issues.length,
+      pureIssuesFetched: pureIssues.length,
+      usedGitHubToken: Boolean(token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN),
+      llmEnrichmentEnabled: isLLMEnabled(),
+      llmTasksQueued: enrichmentTasks.length,
+      llmEnrichmentAttempted: enrichmentCounters.llmEnrichmentAttempted,
+      llmEnrichmentErrors: enrichmentCounters.llmEnrichmentErrors,
+      llmClaimsCreated: enrichmentCounters.llmClaimsCreated,
+      llmEnrichmentSkippedCap: Math.max(0, (enrichmentTasks.length + (prs.length + pureIssues.length - enrichmentTasks.length)) - MAX_LLM_ENRICHMENTS),
+      durationMs: Date.now() - startedAt,
+      warnings: fetchWarnings.slice(0, 20),
+    };
+    console.log(`[ingest/github] done repo=${normalizedRepo} claims=${responseClaims.length} durationMs=${diagnostics.durationMs}`);
+
     res.json({
       message: "Ingested " + prs.length + " PRs and " + pureIssues.length + " issues from " + normalizedRepo,
       repo: normalizedRepo,
@@ -438,13 +529,7 @@ router.post("/ingest/github", async (req, res) => {
       claims: responseClaims.slice(0, 50),
       totalClaims: responseClaims.length,
       leaverUsername: normalizedLeaver,
-      diagnostics: {
-        prsFetched: prs.length,
-        issuesFetched: issues.length,
-        pureIssuesFetched: pureIssues.length,
-        usedGitHubToken: Boolean(token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN),
-        llmEnrichmentEnabled: isLLMEnabled(),
-      },
+      diagnostics,
     });
   } catch (e) {
     console.error("GitHub ingestion failed:", e);
@@ -455,6 +540,9 @@ router.post("/ingest/github", async (req, res) => {
       diagnostics: {
         repo: normalizedRepo,
         usedGitHubToken: Boolean(token || process.env.GITHUB_TOKEN || process.env.GH_TOKEN),
+        llmEnrichmentEnabled: isLLMEnabled(),
+        durationMs: Date.now() - startedAt,
+        warnings: fetchWarnings.slice(0, 20),
       },
     });
   }

@@ -9,20 +9,37 @@ import { claims, sources, stats } from "../store.js";
 let neo4jConnected = false;
 let connectionAttempted = false;
 
+const CONNECT_TIMEOUT_MS = Number(process.env.NEO4J_CONNECT_TIMEOUT_MS) || 8000;
+
+async function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function ensureConnection() {
   if (neo4jConnected) return true;
-  if (connectionAttempted && !neo4jConnected) return false;
+  // Retry connection attempts periodically instead of permanently falling back after first failure.
+  // (keeps startup resilient but allows recovery if env/network becomes available)
 
-  connectionAttempted = true;
   try {
     const session = getSession();
-    await session.run("RETURN 1");
+    await withTimeout(session.run("RETURN 1"), CONNECT_TIMEOUT_MS, "Neo4j connectivity check");
     await session.close();
+    if (!neo4jConnected) console.log("Neo4j connected successfully");
     neo4jConnected = true;
-    console.log("Neo4j connected successfully");
     return true;
   } catch (e) {
-    console.warn("Neo4j not available, using in-memory storage:", e.message);
+    if (neo4jConnected || !connectionAttempted) {
+      console.warn("Neo4j not available, using in-memory storage:", e.message);
+    }
+    connectionAttempted = true;
     neo4jConnected = false;
     return false;
   }

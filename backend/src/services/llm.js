@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { env } from "../config.js";
 
 let client = null;
+const DEFAULT_LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 12000;
 
 function getProvider() {
   return (env.LLM_PROVIDER || process.env.LLM_PROVIDER || "groq").toLowerCase();
@@ -20,8 +21,21 @@ function getClient() {
   client = new OpenAI({
     apiKey,
     baseURL: env.GROQ_BASE_URL || process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1",
+    timeout: DEFAULT_LLM_TIMEOUT_MS,
   });
   return client;
+}
+
+async function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function truncate(text, max = 6000) {
@@ -97,17 +111,22 @@ export async function callLLM(prompt, options = {}) {
   const temperature = typeof options.temperature === "number" ? options.temperature : 0.2;
   const maxTokens = typeof options.maxTokens === "number" ? options.maxTokens : 700;
   const system = options.system || "You are a precise assistant. Return valid JSON only when asked for JSON.";
+  const timeoutMs = typeof options.timeoutMs === "number" ? options.timeoutMs : DEFAULT_LLM_TIMEOUT_MS;
 
-  const response = await llmClient.chat.completions.create({
-    model,
-    temperature,
-    max_tokens: maxTokens,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: prompt },
-    ],
-  });
+  const request = llmClient.chat.completions.create(
+    {
+      model,
+      temperature,
+      max_tokens: maxTokens,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: prompt },
+      ],
+    },
+    { timeout: timeoutMs }
+  );
 
+  const response = await withTimeout(request, timeoutMs + 1000, "LLM request");
   return response?.choices?.[0]?.message?.content?.trim() || "";
 }
 

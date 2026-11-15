@@ -1,15 +1,38 @@
 services:
   - type: web
     name: knowledge-handover
-    env: node
-    rootDirectory: backend
+    runtime: node
+    plan: free
+    rootDir: backend
     buildCommand: npm run install:all
     startCommand: node src/index.js
+    healthCheckPath: /health
     envVars:
       - key: NODE_VERSION
-        value: 20
-      - key: PORT
-        value: 3000
+        value: "20"
       - key: NODE_ENV
         value: production
-    plan: free
+
+      # Set these in Render Dashboard (secrets) before deploy/redeploy
+      - key: DATABASE_URL
+        sync: false # Supabase session pooler: postgresql://postgres.muwwrjhrvhfflgxhsrws:<PASSWORD>@aws-1-us-east-2.pooler.supabase.com:5432/postgres
+      - key: NEO4J_URI
+        sync: false # neo4j+s://ad04e5ae.databases.neo4j.io
+      - key: NEO4J_USER
+        sync: false # ad04e5ae (app reads NEO4J_USER, not NEO4J_USERNAME)
+      - key: NEO4J_PASSWORD
+        sync: false
+
+      - key: LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-20b
+
+      - key: GITHUB_TOKEN
+        sync: false # optional; improves rate limits/private repo access for ingestion
+      - key: PORT
+        value: "3000" # Render also injects PORT; app reads process.env.PORT
