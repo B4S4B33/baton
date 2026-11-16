@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useState } from "react";
 
@@ -6,45 +6,56 @@ type Claim = {
   id: string;
   type: string;
   text: string;
-  confidence: number;
+  confidence?: number;
   status: string;
-  sourceUrl: string;
-  sourceType: string;
-  createdAt: string;
+  sourceUrl?: string;
+  sourceType?: string;
+  createdAt?: string;
   author?: string;
   isLeaver?: boolean;
   body?: string;
   labels?: string[];
   assignees?: string[];
   reviewers?: string[];
-  parentPr?: number;
-  parentPrTitle?: string;
-  parentIssue?: number;
-  parentIssueTitle?: string;
   proof?: any;
+  redacted?: boolean;
+  redactionLevel?: "none" | "partial" | "full";
+  redactionReason?: string | null;
 };
 
 type Stats = {
-  totalPrs: number;
-  mergedPrs: number;
-  openPrs: number;
-  closedPrs: number;
-  totalIssues: number;
-  openIssues: number;
-  closedIssues: number;
-  totalComments: number;
-  leaverActivities: number;
+  totalPrs?: number;
+  mergedPrs?: number;
+  openPrs?: number;
+  closedPrs?: number;
+  totalIssues?: number;
+  openIssues?: number;
+  closedIssues?: number;
+  totalComments?: number;
+  leaverActivities?: number;
+  totalClaims?: number;
+  openCount?: number;
+  mergedCount?: number;
+  closedCount?: number;
+  redactedCount?: number;
+  claimTypes?: string[];
 };
 
-type ActionItem = {
-  id: string;
-  type: string;
-  text: string;
-  status: string;
-  sourceUrl: string;
-  sourceType: string;
-  priority: "high" | "medium" | "low";
+type ActionItem = Claim & { priority?: "high" | "medium" | "low" };
+type Role = "developer" | "pm" | "new_hire";
+type Acknowledgement = {
+  handoverVersionId: string;
+  role: Role;
+  acknowledgedBy?: string | null;
+  acknowledgedAt: string;
+  notes?: string | null;
 };
+
+const ROLES: { role: Role; label: string; description: string }[] = [
+  { role: "developer", label: "Developer", description: "Technical detail, code/review context, with sensitive values masked." },
+  { role: "pm", label: "PM", description: "Status, decisions, risks, ownership, and blockers with low-level noise reduced." },
+  { role: "new_hire", label: "New Hire", description: "Onboarding-focused summary with sensitive and low-level details hidden." },
+];
 
 export default function Home() {
   const [view, setView] = useState<"landing" | "dashboard">("landing");
@@ -63,61 +74,49 @@ export default function Home() {
   const [validationLoading, setValidationLoading] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  const [selectedRole, setSelectedRole] = useState<Role>("developer");
+  const [acknowledgements, setAcknowledgements] = useState<Acknowledgement[]>([]);
+  const [ackBy, setAckBy] = useState("");
+  const [ackNotes, setAckNotes] = useState("");
+  const [ackLoading, setAckLoading] = useState(false);
+  const [ackMessage, setAckMessage] = useState<string | null>(null);
+
   const extractRepo = (url: string): string | null => {
     const match = url.match(/github\.com\/([^\/]+)\/([^\/]+?)(?:\.git)?\/?$/);
     if (!match) return null;
     return `${match[1]}/${match[2]}`;
   };
 
+  const loadRoleView = async (role: Role) => {
+    const res = await fetch(`/api/handover/view?role=${encodeURIComponent(role)}&handoverVersionId=default`);
+    let data: any = null;
+    try { data = await res.json(); } catch { data = null; }
+    if (!res.ok) throw new Error(data?.error || "Failed to load handover view");
+    setClaims(Array.isArray(data.claims) ? data.claims : []);
+    setStats(data.stats || null);
+    setActionItems(Array.isArray(data.actionItems) ? data.actionItems : []);
+    setLeaverActivity(data.leaverActivity || null);
+    setAcknowledgements(Array.isArray(data.acknowledgements) ? data.acknowledgements : []);
+    return data;
+  };
+
   const handleIngest = async (e: React.FormEvent) => {
     e.preventDefault();
     const repo = extractRepo(repoUrl);
-    if (!repo) {
-      setError("Invalid GitHub repository URL. Use format: https://github.com/owner/repo");
-      return;
-    }
-
+    if (!repo) { setError("Invalid GitHub repository URL. Use format: https://github.com/owner/repo"); return; }
     setLoading(true);
     setError(null);
-
     try {
       const res = await fetch("/api/ingest/github", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repo,
-          leaverUsername: leaverUsername || undefined,
-          token: githubToken || undefined,
-        }),
+        body: JSON.stringify({ repo, leaverUsername: leaverUsername || undefined, token: githubToken || undefined }),
       });
-
       let data: any = null;
-      try {
-        data = await res.json();
-      } catch {
-        data = null;
-      }
-
-      if (!res.ok) {
-        const detail = data?.details || data?.detail || data?.error || res.statusText;
-        throw new Error(`Ingestion failed: ${detail}`);
-      }
-
-      setStats(data.stats || null);
-      setClaims(Array.isArray(data.claims) ? data.claims : []);
+      try { data = await res.json(); } catch { data = null; }
+      if (!res.ok) throw new Error(`Ingestion failed: ${data?.details || data?.detail || data?.error || res.statusText}`);
       setView("dashboard");
-
-      // Fetch action items
-      const actionRes = await fetch("/api/action-items");
-      const actionData = await actionRes.json();
-      setActionItems(actionData.actionItems);
-
-      // Fetch leaver activity
-      if (leaverUsername) {
-        const leaverRes = await fetch("/api/leaver-activity");
-        const leaverData = await leaverRes.json();
-        setLeaverActivity(leaverData);
-      }
+      await loadRoleView(selectedRole);
     } catch (e: any) {
       setError(e.message || "Failed to ingest data");
     } finally {
@@ -132,11 +131,10 @@ export default function Home() {
       const res = await fetch("/api/validate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ handoverVersionId: "default" }),
+        body: JSON.stringify({ handoverVersionId: "default", roleId: selectedRole }),
       });
       if (!res.ok) throw new Error(`Validation failed: ${res.statusText}`);
-      const data = await res.json();
-      setValidationResults(data);
+      setValidationResults(await res.json());
     } catch (e: any) {
       setValidationError(e.message || "Validation failed");
     } finally {
@@ -144,23 +142,49 @@ export default function Home() {
     }
   };
 
+  const submitAcknowledgement = async () => {
+    setAckLoading(true);
+    setAckMessage(null);
+    try {
+      const res = await fetch("/api/handover/acknowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ handoverVersionId: "default", role: selectedRole, acknowledgedBy: ackBy || undefined, notes: ackNotes || undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "Failed to acknowledge");
+      setAcknowledgements(Array.isArray(data.acknowledgements) ? data.acknowledgements : acknowledgements);
+      setAckMessage(`${ROLES.find((r) => r.role === selectedRole)?.label || selectedRole} view acknowledged.`);
+    } catch (e: any) {
+      setAckMessage(e.message || "Failed to acknowledge");
+    } finally {
+      setAckLoading(false);
+    }
+  };
+
   useEffect(() => {
-    // Load existing claims on mount
-    const loadClaims = async () => {
+    (async () => {
       try {
-        const res = await fetch("/api/claims");
-        const data = await res.json();
-        if (data.claims && data.claims.length > 0) {
-          setClaims(data.claims);
-          setStats(data.stats);
+        const viewRes = await fetch(`/api/handover/view?role=${encodeURIComponent(selectedRole)}&handoverVersionId=default`);
+        const data = await viewRes.json();
+        if (viewRes.ok && ((data.claims && data.claims.length > 0) || (data.actionItems && data.actionItems.length > 0))) {
+          setClaims(Array.isArray(data.claims) ? data.claims : []);
+          setStats(data.stats || null);
+          setActionItems(Array.isArray(data.actionItems) ? data.actionItems : []);
+          setLeaverActivity(data.leaverActivity || null);
+          setAcknowledgements(Array.isArray(data.acknowledgements) ? data.acknowledgements : []);
           setView("dashboard");
         }
-      } catch {
-        // Ignore - no existing data
-      }
-    };
-    loadClaims();
+      } catch {}
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (view !== "dashboard") return;
+    loadRoleView(selectedRole).catch((e) => setError(e.message || "Failed to load role view"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRole, view]);
 
   const filteredClaims = claims.filter((c) => {
     if (filterStatus === "all") return true;
@@ -168,670 +192,205 @@ export default function Home() {
     return c.status === filterStatus;
   });
 
-  const openCount = claims.filter((c) => c.status === "open").length;
+  const openCount = claims.filter((c) => c.status === "open" || c.status === "proposed").length;
   const mergedCount = claims.filter((c) => c.status === "merged").length;
   const closedCount = claims.filter((c) => c.status === "closed").length;
+  const redactedCount = claims.filter((c) => c.redacted).length;
+  const currentAck = acknowledgements.find((a) => a.role === selectedRole);
+  const roleMeta = ROLES.find((r) => r.role === selectedRole)!;
 
   const priorityFor = (claim: Claim): "high" | "medium" | "low" => {
     if (claim.type === "open_pr" || claim.type === "open_issue") return "high";
     if (claim.type === "pr_review_comment" && claim.isLeaver) return "high";
-    if (claim.status === "open") return "medium";
+    if (claim.status === "open" || claim.status === "proposed") return "medium";
     return "low";
   };
 
-  const typeColor = (type: string) => {
-    const colors: Record<string, string> = {
-      merged_pr: "#10b981",
-      open_pr: "#3b82f6",
-      closed_pr: "#6b7280",
-      open_issue: "#f59e0b",
-      closed_issue: "#6b7280",
-      pr_comment: "#8b5cf6",
-      pr_review_comment: "#ec4899",
-      issue_comment: "#06b6d4",
-      decision: "#84cc16",
-      task: "#f97316",
-    };
-    return colors[type] || "#6b7280";
-  };
+  const typeColor = (type: string) => ({
+    merged_pr: "#10b981", open_pr: "#3b82f6", closed_pr: "#6b7280", open_issue: "#f59e0b", closed_issue: "#6b7280",
+    pr_comment: "#8b5cf6", pr_review_comment: "#ec4899", issue_comment: "#06b6d4", decision: "#84cc16", task: "#f97316",
+    risk: "#ef4444", dependency: "#14b8a6", question: "#a855f7", insight: "#0ea5e9",
+  } as Record<string, string>)[type] || "#6b7280";
 
-  const statusColor = (status: string) => {
-    const colors: Record<string, string> = {
-      merged: "#10b981",
-      open: "#3b82f6",
-      closed: "#6b7280",
-      commented: "#8b5cf6",
-      reviewed: "#ec4899",
-    };
-    return colors[status] || "#6b7280";
-  };
+  const statusColor = (status: string) => ({
+    merged: "#10b981", open: "#3b82f6", closed: "#6b7280", commented: "#8b5cf6", reviewed: "#ec4899", proposed: "#f59e0b", accepted: "#10b981",
+  } as Record<string, string>)[status] || "#6b7280";
+
+  const Citation = ({ url }: { url?: string }) => url ? (
+    <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: "#3b82f6", textDecoration: "none", fontSize: 12, fontWeight: 600 }}>View source</a>
+  ) : <span style={{ color: "#94a3b8", fontSize: 12 }}>No citation</span>;
 
   if (view === "landing") {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "#0f172a" }}>
-        <div
-          style={{
-            background: "rgba(255, 255, 255, 0.95)",
-            borderRadius: "24px",
-            padding: "48px",
-            maxWidth: "560px",
-            boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.5)",
-            border: "1px solid rgba(255, 255, 255, 0.2)",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "8px" }}>
-            <div
-              style={{
-                width: "32px",
-                height: "32px",
-                background: "linear-gradient(135deg, #3b82f6, #8b5cf6)",
-                borderRadius: "8px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "white",
-                fontWeight: "bold",
-                fontSize: "16px",
-              }}
-            >
-              KH
-            </div>
-            <h1 style={{ fontSize: "28px", fontWeight: "800", color: "#0f172a", margin: 0 }}>
-              Knowledge Handover
-            </h1>
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0f172a" }}>
+        <div style={{ background: "rgba(255,255,255,0.97)", borderRadius: 24, padding: 48, maxWidth: 560, width: "100%", boxShadow: "0 25px 50px -12px rgba(0,0,0,0.5)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+            <div style={{ width: 32, height: 32, background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", color: "white", fontWeight: 700 }}>KH</div>
+            <h1 style={{ fontSize: 28, fontWeight: 800, color: "#0f172a", margin: 0 }}>Knowledge Handover</h1>
           </div>
-          <p style={{ color: "#64748b", marginBottom: "32px", lineHeight: 1.6 }}>
-            Convert scattered project activity into a structured handover when a team member leaves.
-            Enter the repository URL and the departing member's GitHub username.
+          <p style={{ color: "#64748b", marginBottom: 24, lineHeight: 1.6 }}>
+            Role-scoped handover views (Developer, PM, New Hire) with claim-level redaction, clickable citations, and acknowledgement tracking.
           </p>
-
-          <form onSubmit={handleIngest} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-            <div>
-              <label style={{ display: "block", fontWeight: "600", color: "#334155", marginBottom: "8px", fontSize: "14px" }}>
-                Repository URL
-              </label>
-              <input
-                type="url"
-                placeholder="https://github.com/owner/repo"
-                value={repoUrl}
-                onChange={(e) => setRepoUrl(e.target.value)}
-                required
-                style={{
-                  width: "100%",
-                  padding: "14px 16px",
-                  border: "1px solid #cbd5e1",
-                  borderRadius: "10px",
-                  fontSize: "14px",
-                  outline: "none",
-                  boxSizing: "border-box",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontWeight: "600", color: "#334155", marginBottom: "8px", fontSize: "14px" }}>
-                Departing Member's GitHub Username (optional)
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. johndoe"
-                value={leaverUsername}
-                onChange={(e) => setLeaverUsername(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "14px 16px",
-                  border: "1px solid #cbd5e1",
-                  borderRadius: "10px",
-                  fontSize: "14px",
-                  outline: "none",
-                  boxSizing: "border-box",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ display: "block", fontWeight: "600", color: "#334155", marginBottom: "8px", fontSize: "14px" }}>
-                GitHub Token (optional, recommended on Render)
-              </label>
-              <input
-                type="password"
-                placeholder="ghp_... or fine-grained token"
-                value={githubToken}
-                onChange={(e) => setGithubToken(e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "14px 16px",
-                  border: "1px solid #cbd5e1",
-                  borderRadius: "10px",
-                  fontSize: "14px",
-                  outline: "none",
-                  boxSizing: "border-box",
-                }}
-              />
-              <p style={{ marginTop: "6px", fontSize: "12px", color: "#64748b" }}>
-                Used only for this ingest request to avoid GitHub rate limits or private-repo access issues.
-              </p>
-            </div>
-
-            {error && (
-              <div style={{ color: "#dc2626", background: "#fef2f2", padding: "12px", borderRadius: "8px", fontSize: "14px" }}>
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              style={{
-                width: "100%",
-                padding: "16px",
-                background: loading ? "#94a3b8" : "linear-gradient(135deg, #3b82f6, #8b5cf6)",
-                color: "white",
-                border: "none",
-                borderRadius: "10px",
-                fontSize: "16px",
-                fontWeight: "700",
-                cursor: loading ? "not-allowed" : "pointer",
-                transition: "transform 0.2s",
-              }}
-              onMouseEnter={(e) => { if (!loading) (e.currentTarget as HTMLElement).style.transform = "scale(1.02)"; }}
-              onMouseLeave={(e) => { if (!loading) (e.currentTarget as HTMLElement).style.transform = "scale(1)"; }}
-            >
+          <form onSubmit={handleIngest} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <label style={{ fontWeight: 600, color: "#334155", fontSize: 14 }}>Repository URL
+              <input type="url" placeholder="https://github.com/owner/repo" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} required style={{ width: "100%", marginTop: 8, padding: "14px 16px", border: "1px solid #cbd5e1", borderRadius: 10, boxSizing: "border-box" }} />
+            </label>
+            <label style={{ fontWeight: 600, color: "#334155", fontSize: 14 }}>Departing Member&apos;s GitHub Username (optional)
+              <input type="text" placeholder="e.g. johndoe" value={leaverUsername} onChange={(e) => setLeaverUsername(e.target.value)} style={{ width: "100%", marginTop: 8, padding: "14px 16px", border: "1px solid #cbd5e1", borderRadius: 10, boxSizing: "border-box" }} />
+            </label>
+            <label style={{ fontWeight: 600, color: "#334155", fontSize: 14 }}>GitHub Token (optional)
+              <input type="password" placeholder="ghp_..." value={githubToken} onChange={(e) => setGithubToken(e.target.value)} style={{ width: "100%", marginTop: 8, padding: "14px 16px", border: "1px solid #cbd5e1", borderRadius: 10, boxSizing: "border-box" }} />
+            </label>
+            {error && <div style={{ color: "#dc2626", background: "#fef2f2", padding: 12, borderRadius: 8, fontSize: 14 }}>{error}</div>}
+            <button type="submit" disabled={loading} style={{ width: "100%", padding: 16, background: loading ? "#94a3b8" : "linear-gradient(135deg,#3b82f6,#8b5cf6)", color: "white", border: "none", borderRadius: 10, fontSize: 16, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer" }}>
               {loading ? "Ingesting project data..." : "Start Handover Analysis"}
             </button>
           </form>
-
-          <div style={{ marginTop: "32px", paddingTop: "24px", borderTop: "1px solid #e2e8f0" }}>
-            <h3 style={{ fontSize: "16px", fontWeight: "700", color: "#334155", marginBottom: "12px" }}>
-              What gets analyzed:
-            </h3>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "12px" }}>
-              <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", fontSize: "13px", color: "#475569" }}>
-                • All PRs (open, merged, closed)
-              </div>
-              <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", fontSize: "13px", color: "#475569" }}>
-                • All issues (open, closed)
-              </div>
-              <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", fontSize: "13px", color: "#475569" }}>
-                • PR & issue comments
-              </div>
-              <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", fontSize: "13px", color: "#475569" }}>
-                • Leaver's activity trail
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     );
   }
 
-  // Dashboard View
   return (
-    <div className="min-h-screen" style={{ background: "#f8fafc", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
-      {/* Header */}
-      <header
-        style={{
-          background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)",
-          color: "white",
-          padding: "24px 32px",
-          boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
-        }}
-      >
-        <div style={{ maxWidth: "1400px", margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-            <div
-              style={{
-                width: "40px",
-                height: "40px",
-                background: "linear-gradient(135deg, #3b82f6, #8b5cf6)",
-                borderRadius: "10px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "white",
-                fontWeight: "bold",
-                fontSize: "18px",
-              }}
-            >
-              KH
-            </div>
+    <div style={{ minHeight: "100vh", background: "#f8fafc", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
+      <header style={{ background: "linear-gradient(135deg,#0f172a 0%,#1e293b 100%)", color: "white", padding: "24px 32px" }}>
+        <div style={{ maxWidth: 1400, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 40, height: 40, background: "linear-gradient(135deg,#3b82f6,#8b5cf6)", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>KH</div>
             <div>
-              <h1 style={{ fontSize: "22px", fontWeight: "700", margin: 0 }}>Knowledge Handover</h1>
-              <p style={{ fontSize: "14px", color: "#94a3b8", margin: 0 }}>
-                Project reconstruction &amp; continuation plan
-              </p>
+              <h1 style={{ fontSize: 22, fontWeight: 700, margin: 0 }}>Knowledge Handover</h1>
+              <p style={{ fontSize: 14, color: "#94a3b8", margin: 0 }}>Role-scoped view: {roleMeta.label}</p>
             </div>
           </div>
-          <div style={{ display: "flex", gap: "12px" }}>
-            <button
-              onClick={() => setView("landing")}
-              style={{
-                background: "rgba(255, 255, 255, 0.1)",
-                color: "white",
-                border: "1px solid rgba(255, 255, 255, 0.2)",
-                padding: "10px 20px",
-                borderRadius: "8px",
-                fontSize: "14px",
-                fontWeight: "600",
-                cursor: "pointer",
-              }}
-            >
-              New Analysis
-            </button>
-            <button
-              onClick={() => window.location.reload()}
-              style={{
-                background: "#3b82f6",
-                color: "white",
-                border: "none",
-                padding: "10px 20px",
-                borderRadius: "8px",
-                fontSize: "14px",
-                fontWeight: "600",
-                cursor: "pointer",
-              }}
-            >
-              Refresh Data
-            </button>
-            <button
-              onClick={runValidation}
-              disabled={validationLoading}
-              style={{
-                background: validationLoading ? "#94a3b8" : "#10b981",
-                color: "white",
-                border: "none",
-                padding: "10px 20px",
-                borderRadius: "8px",
-                fontSize: "14px",
-                fontWeight: "600",
-                cursor: validationLoading ? "not-allowed" : "pointer",
-              }}
-            >
-              {validationLoading ? "Validating..." : "Run Validation"}
-            </button>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <button onClick={() => setView("landing")} style={{ background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", padding: "10px 20px", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>New Analysis</button>
+            <button onClick={() => loadRoleView(selectedRole)} style={{ background: "#3b82f6", color: "white", border: "none", padding: "10px 20px", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>Refresh View</button>
+            <button onClick={runValidation} disabled={validationLoading} style={{ background: validationLoading ? "#94a3b8" : "#10b981", color: "white", border: "none", padding: "10px 20px", borderRadius: 8, fontWeight: 600, cursor: validationLoading ? "not-allowed" : "pointer" }}>{validationLoading ? "Validating..." : "Run Validation"}</button>
           </div>
         </div>
       </header>
 
-      {/* Validation Results */}
-      {validationResults && (
-        <div
-          style={{
-            maxWidth: "1400px",
-            margin: "0 auto",
-            padding: "0 32px 24px",
-            background: validationResults.passed ? "#f0fdf4" : "#fef2f2",
-            border: `1px solid ${validationResults.passed ? "#bbf7d0" : "#fecaca"}`,
-            borderRadius: "12px",
-            marginBottom: "32px",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
-            <div
-              style={{
-                width: "32px",
-                height: "32px",
-                background: validationResults.passed ? "#10b981" : "#f59e0b",
-                borderRadius: "8px",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "white",
-                fontWeight: "bold",
-              }}
-            >
-              {validationResults.passed ? "✓" : "⚠"}
-            </div>
+      <div style={{ maxWidth: 1400, margin: "0 auto", padding: 32 }}>
+        {error && <div style={{ marginBottom: 16, color: "#dc2626", background: "#fef2f2", padding: 12, borderRadius: 8 }}>{error}</div>}
+        {validationError && <div style={{ marginBottom: 16, color: "#dc2626", background: "#fef2f2", padding: 12, borderRadius: 8 }}>{validationError}</div>}
+
+        <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 16, padding: 20, marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
             <div>
-              <h2 style={{ fontSize: "18px", fontWeight: "700", color: "#0f172a", margin: 0 }}>
-                Validation Results
-              </h2>
-              <p style={{ fontSize: "14px", color: "#64748b", margin: "4px 0 0" }}>
-                {validationResults.passed
-                  ? "All checks passed. Handover is ready to share."
-                  : `${validationResults.criticalFailures?.length || 0} critical issue(s) found. Review before sharing.`}
-              </p>
+              <h2 style={{ margin: "0 0 8px", fontSize: 18, color: "#0f172a" }}>Handover Views & Acknowledgement</h2>
+              <p style={{ margin: 0, color: "#64748b", fontSize: 14 }}>{roleMeta.description}</p>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {ROLES.map((r) => (
+                <button key={r.role} onClick={() => { setSelectedRole(r.role); setAckMessage(null); }} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #cbd5e1", background: selectedRole === r.role ? "#3b82f6" : "white", color: selectedRole === r.role ? "white" : "#334155", fontWeight: 600, cursor: "pointer" }}>{r.label}</button>
+              ))}
             </div>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }}>
-            {validationResults.results.map((r: any) => (
-              <div
-                key={r.id}
-                style={{
-                  background: "white",
-                  borderRadius: "8px",
-                  padding: "16px",
-                  border: `1px solid ${r.status === "fail" ? "#fecaca" : "#bbf7d0"}`,
-                }}
-              >
-                <div style={{ fontSize: "12px", fontWeight: "600", color: "#64748b", textTransform: "uppercase" }}>
-                  {r.name}
+          <div style={{ marginTop: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+            {ROLES.map((r) => {
+              const ack = acknowledgements.find((a) => a.role === r.role);
+              return (
+                <div key={r.role} style={{ border: "1px solid #e2e8f0", borderRadius: 10, padding: 12, background: ack ? "#f0fdf4" : "#fff" }}>
+                  <div style={{ fontWeight: 700, color: "#0f172a" }}>{r.label}</div>
+                  <div style={{ fontSize: 13, color: ack ? "#15803d" : "#64748b", marginTop: 4 }}>{ack ? `Acknowledged ${new Date(ack.acknowledgedAt).toLocaleString()}` : "Not acknowledged"}</div>
+                  {ack?.acknowledgedBy && <div style={{ fontSize: 12, color: "#475569", marginTop: 2 }}>By: {ack.acknowledgedBy}</div>}
                 </div>
-                <div
-                  style={{
-                    fontSize: "14px",
-                    fontWeight: "700",
-                    color: r.status === "fail" ? "#dc2626" : "#15803d",
-                    margin: "8px 0",
-                  }}
-                >
-                  {r.status.toUpperCase()}
-                </div>
-                <div style={{ fontSize: "13px", color: "#475569" }}>{r.detail}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
-          {(() => {
-            const contradictionResult = validationResults.results.find(
-              (r: any) => r.type === "contradiction"
-            );
-            const hasContradictions = contradictionResult && contradictionResult.contradictions && contradictionResult.contradictions.length > 0;
-            if (!hasContradictions) return null;
-            return (
-              <div style={{ marginTop: "16px", background: "#fffbeb", border: "1px solid #fde047", borderRadius: "8px", padding: "16px" }}>
-                <div style={{ fontSize: "14px", fontWeight: "700", color: "#713f12", marginBottom: "8px" }}>
-                  ⚠ Contradictions Detected
+          <div style={{ marginTop: 16, borderTop: "1px solid #e2e8f0", paddingTop: 16, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, alignItems: "end" }}>
+            <label style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>Acknowledge as (name, optional)
+              <input value={ackBy} onChange={(e) => setAckBy(e.target.value)} placeholder="e.g. Alex" style={{ width: "100%", marginTop: 6, padding: "10px 12px", border: "1px solid #cbd5e1", borderRadius: 8, boxSizing: "border-box" }} />
+            </label>
+            <label style={{ fontSize: 13, color: "#334155", fontWeight: 600 }}>Notes (optional)
+              <input value={ackNotes} onChange={(e) => setAckNotes(e.target.value)} placeholder="e.g. Ready to continue" style={{ width: "100%", marginTop: 6, padding: "10px 12px", border: "1px solid #cbd5e1", borderRadius: 8, boxSizing: "border-box" }} />
+            </label>
+            <div>
+              <button onClick={submitAcknowledgement} disabled={ackLoading} style={{ padding: "10px 16px", borderRadius: 8, border: "none", background: ackLoading ? "#94a3b8" : "#0f766e", color: "white", fontWeight: 700, cursor: ackLoading ? "not-allowed" : "pointer", width: "100%" }}>
+                {ackLoading ? "Saving..." : currentAck ? `Re-acknowledge ${roleMeta.label}` : `Acknowledge ${roleMeta.label} View`}
+              </button>
+              {ackMessage && <div style={{ marginTop: 8, fontSize: 13, color: "#334155" }}>{ackMessage}</div>}
+            </div>
+          </div>
+        </div>
+
+        {validationResults && (
+          <div style={{ marginBottom: 24, padding: 16, background: validationResults.passed ? "#f0fdf4" : "#fef2f2", border: `1px solid ${validationResults.passed ? "#bbf7d0" : "#fecaca"}`, borderRadius: 12 }}>
+            <div style={{ fontWeight: 700, color: "#0f172a", marginBottom: 8 }}>Validation Results: {validationResults.passed ? "Passed" : `${validationResults.criticalFailures?.length || 0} critical issue(s)`}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+              {(validationResults.results || []).map((r: any) => (
+                <div key={r.id} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 8, padding: 12 }}>
+                  <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700, textTransform: "uppercase" }}>{r.name}</div>
+                  <div style={{ fontWeight: 700, color: r.status === "fail" || r.status === "warning" ? "#b45309" : "#15803d", margin: "4px 0" }}>{String(r.status).toUpperCase()}</div>
+                  <div style={{ fontSize: 13, color: "#475569" }}>{r.detail}</div>
                 </div>
-                {contradictionResult.contradictions.map((c: any) => (
-                  <div
-                    key={`${c.claimAId}-${c.claimBId}`}
-                    style={{
-                      background: "white",
-                      borderRadius: "6px",
-                      padding: "12px",
-                      marginBottom: "8px",
-                      fontSize: "13px",
-                    }}
-                  >
-                    <div style={{ fontWeight: "600", color: "#0f172a" }}>{c.claimAText}</div>
-                    <div style={{ color: "#64748b", fontSize: "12px", margin: "4px 0" }}>{c.claimBText}</div>
-                    <div style={{ fontSize: "11px", color: "#713f12" }}>{c.explanation}</div>
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-        </div>
-      )}
-
-      <div style={{ maxWidth: "1400px", margin: "0 auto", padding: "32px" }}>
-        {/* Stats Row */}
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "20px", marginBottom: "32px" }}>
-          {[
-            { label: "Total PRs", value: stats?.totalPrs || 0, color: "#3b82f6", sub: "Pull requests analyzed" },
-            { label: "Merged", value: stats?.mergedPrs || 0, color: "#10b981", sub: "Successfully merged" },
-            { label: "Open PRs", value: stats?.openPrs || 0, color: "#f59e0b", sub: "Needs attention" },
-            { label: "Issues", value: stats?.totalIssues || 0, color: "#8b5cf6", sub: "Open & closed" },
-            { label: "Comments", value: stats?.totalComments || 0, color: "#06b6d4", sub: "Discussion threads" },
-            { label: "Leaver Actions", value: stats?.leaverActivities || 0, color: "#ec4899", sub: "By departing member" },
-          ].map((stat) => (
-            <div
-              key={stat.label}
-              style={{
-                background: "white",
-                borderRadius: "16px",
-                padding: "20px",
-                boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)",
-                border: "1px solid #f1f5f9",
-              }}
-            >
-              <div style={{ fontSize: "12px", fontWeight: "600", color: "#64748b", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                {stat.label}
-              </div>
-              <div style={{ fontSize: "32px", fontWeight: "800", color: stat.color, margin: "8px 0" }}>
-                {stat.value}
-              </div>
-              <div style={{ fontSize: "13px", color: "#94a3b8" }}>{stat.sub}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* Leaver Activity Section */}
-        {leaverActivity && leaverActivity.totalActivities > 0 && (
-          <div
-            style={{
-              background: "linear-gradient(135deg, #fdf2f8 0%, #fce7f3 100%)",
-              border: "1px solid #fbcfe8",
-              borderRadius: "16px",
-              padding: "24px",
-              marginBottom: "32px",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px" }}>
-              <div
-                style={{
-                  width: "36px",
-                  height: "36px",
-                  background: "#ec4899",
-                  borderRadius: "10px",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "white",
-                  fontWeight: "bold",
-                }}
-              >
-                👤
-              </div>
-              <div>
-                <h2 style={{ fontSize: "18px", fontWeight: "700", color: "#0f172a", margin: 0 }}>
-                  Departing Member: {leaverActivity.leaverUsername || "Unknown"}
-                </h2>
-                <p style={{ fontSize: "14px", color: "#64748b", margin: "4px 0 0" }}>
-                  {leaverActivity.totalActivities} activities traced across PRs, issues &amp; comments
-                </p>
-              </div>
-            </div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                <thead>
-                  <tr style={{ textAlign: "left", borderBottom: "2px solid #fbcfe8" }}>
-                    <th style={{ padding: "10px", color: "#be185d", fontWeight: "700" }}>Type</th>
-                    <th style={{ padding: "10px", color: "#be185d", fontWeight: "700" }}>Title</th>
-                    <th style={{ padding: "10px", color: "#be185d", fontWeight: "700" }}>Status</th>
-                    <th style={{ padding: "10px", color: "#be185d", fontWeight: "700" }}>Date</th>
-                    <th style={{ padding: "10px", color: "#be185d", fontWeight: "700" }}>Source</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {leaverActivity.activities.slice(0, 8).map((a: Claim) => (
-                    <tr key={a.id} style={{ borderBottom: "1px solid #fce7f3" }}>
-                      <td style={{ padding: "10px", color: "#334155" }}>
-                        <span
-                          style={{
-                            display: "inline-block",
-                            padding: "4px 8px",
-                            borderRadius: "6px",
-                            background: "rgba(236, 72, 153, 0.1)",
-                            color: "#be185d",
-                            fontSize: "11px",
-                            fontWeight: "600",
-                          }}
-                        >
-                          {a.type.replace(/_/g, " ").toUpperCase()}
-                        </span>
-                      </td>
-                      <td style={{ padding: "10px", color: "#334155", fontWeight: "600" }}>
-                        {a.text}
-                      </td>
-                      <td style={{ padding: "10px", color: "#334155" }}>
-                        <span
-                          style={{
-                            display: "inline-block",
-                            padding: "4px 8px",
-                            borderRadius: "6px",
-                            background: "rgba(16, 185, 129, 0.1)",
-                            color: "#15803d",
-                            fontSize: "11px",
-                            fontWeight: "600",
-                          }}
-                        >
-                          {a.status}
-                        </span>
-                      </td>
-                      <td style={{ padding: "10px", color: "#64748b" }}>
-                        {new Date(a.createdAt).toLocaleDateString()}
-                      </td>
-                      <td style={{ padding: "10px", color: "#334155" }}>
-                        <a
-                          href={a.sourceUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          style={{ color: "#3b82f6", textDecoration: "none", fontSize: "12px" }}
-                        >
-                          View Source →
-                        </a>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {leaverActivity.activities.length > 8 && (
-                <p style={{ marginTop: "12px", fontSize: "13px", color: "#64748b" }}>
-                  Showing 8 of {leaverActivity.activities.length} leaver activities
-                </p>
-              )}
+              ))}
             </div>
           </div>
         )}
 
-        {/* Action Items Section */}
-        <div style={{ marginBottom: "32px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#0f172a", margin: 0 }}>
-              Immediate Action Items
-            </h2>
-            <span
-              style={{
-                display: "inline-block",
-                padding: "6px 12px",
-                borderRadius: "20px",
-                background: "#fef2f2",
-                color: "#dc2626",
-                fontSize: "12px",
-                fontWeight: "700",
-              }}
-            >
-              {actionItems.length} items need attention
-            </span>
-          </div>
-          <div
-            style={{
-              background: "white",
-              borderRadius: "16px",
-              boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)",
-              border: "1px solid #f1f5f9",
-            }}
-          >
-            {actionItems.length === 0 ? (
-              <div style={{ padding: "40px", textAlign: "center", color: "#64748b" }}>
-                No immediate action items. All caught up! ✅
-              </div>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                  <thead>
-                    <tr style={{ textAlign: "left", borderBottom: "2px solid #f1f5f9" }}>
-                      <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "12px" }}>
-                        Priority
-                      </th>
-                      <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "12px" }}>
-                        Task
-                      </th>
-                      <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "12px" }}>
-                        Type
-                      </th>
-                      <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "12px" }}>
-                        Source
-                      </th>
-                      <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "12px" }}>
-                        Action
-                      </th>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 16, marginBottom: 24 }}>
+          {[
+            { label: "Visible Claims", value: claims.length, color: "#3b82f6", sub: `${roleMeta.label} view` },
+            { label: "Open/Proposed", value: stats?.openCount ?? openCount, color: "#f59e0b", sub: "Needs attention" },
+            { label: "Merged/Closed", value: (stats?.mergedCount ?? mergedCount) + (stats?.closedCount ?? closedCount), color: "#10b981", sub: "Resolved history" },
+            { label: "Redacted", value: stats?.redactedCount ?? redactedCount, color: "#ef4444", sub: "Claim-level redactions" },
+            { label: "Action Items", value: actionItems.length, color: "#8b5cf6", sub: "Scoped to role" },
+            { label: "Leaver Activities", value: leaverActivity?.totalActivities ?? stats?.leaverActivities ?? 0, color: "#ec4899", sub: "Visible to role" },
+          ].map((s) => (
+            <div key={s.label} style={{ background: "white", borderRadius: 14, padding: 16, border: "1px solid #f1f5f9" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", textTransform: "uppercase" }}>{s.label}</div>
+              <div style={{ fontSize: 30, fontWeight: 800, color: s.color, margin: "6px 0" }}>{s.value}</div>
+              <div style={{ fontSize: 13, color: "#94a3b8" }}>{s.sub}</div>
+            </div>
+          ))}
+        </div>
+
+        {leaverActivity && (leaverActivity.totalActivities || 0) > 0 && (
+          <div style={{ background: "linear-gradient(135deg,#fdf2f8 0%,#fce7f3 100%)", border: "1px solid #fbcfe8", borderRadius: 16, padding: 20, marginBottom: 24 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, color: "#0f172a", margin: "0 0 4px" }}>Departing Member: {leaverActivity.leaverUsername || "Unknown"}</h2>
+            <p style={{ fontSize: 14, color: "#64748b", margin: "0 0 12px" }}>{leaverActivity.totalActivities} visible activities in {roleMeta.label} view</p>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead><tr style={{ textAlign: "left", borderBottom: "2px solid #fbcfe8" }}><th style={{ padding: 10 }}>Type</th><th style={{ padding: 10 }}>Title</th><th style={{ padding: 10 }}>Citation</th><th style={{ padding: 10 }}>Redaction</th></tr></thead>
+                <tbody>
+                  {(leaverActivity.activities || []).slice(0, 8).map((a: Claim) => (
+                    <tr key={a.id} style={{ borderBottom: "1px solid #fce7f3" }}>
+                      <td style={{ padding: 10 }}>{a.type.replace(/_/g, " ").toUpperCase()}</td>
+                      <td style={{ padding: 10, fontWeight: 600 }}>{a.text}</td>
+                      <td style={{ padding: 10 }}><Citation url={a.sourceUrl} /></td>
+                      <td style={{ padding: 10 }}>{a.redacted ? <span title={a.redactionReason || "Redacted"} style={{ color: "#b91c1c", fontWeight: 600 }}>Redacted</span> : "Visible"}</td>
                     </tr>
-                  </thead>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div style={{ marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <h2 style={{ fontSize: 20, fontWeight: 700, color: "#0f172a", margin: 0 }}>Action Items ({roleMeta.label})</h2>
+            <span style={{ padding: "6px 12px", borderRadius: 20, background: "#fef2f2", color: "#dc2626", fontSize: 12, fontWeight: 700 }}>{actionItems.length} visible</span>
+          </div>
+          <div style={{ background: "white", borderRadius: 16, border: "1px solid #f1f5f9" }}>
+            {actionItems.length === 0 ? <div style={{ padding: 32, textAlign: "center", color: "#64748b" }}>No action items visible for this role.</div> : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead><tr style={{ textAlign: "left", borderBottom: "2px solid #f1f5f9" }}><th style={{ padding: "14px 16px" }}>Priority</th><th style={{ padding: "14px 16px" }}>Task</th><th style={{ padding: "14px 16px" }}>Type</th><th style={{ padding: "14px 16px" }}>Citation</th><th style={{ padding: "14px 16px" }}>Redaction</th></tr></thead>
                   <tbody>
-                    {actionItems.slice(0, 10).map((item) => (
-                      <tr key={item.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                        <td style={{ padding: "14px 16px", color: "#334155" }}>
-                          <span
-                            style={{
-                              display: "inline-block",
-                              padding: "4px 8px",
-                              borderRadius: "6px",
-                              background:
-                                item.priority === "high"
-                                  ? "rgba(239, 68, 68, 0.1)"
-                                  : item.priority === "medium"
-                                  ? "rgba(245, 158, 11, 0.1)"
-                                  : "rgba(16, 185, 129, 0.1)",
-                              color:
-                                item.priority === "high"
-                                  ? "#dc2626"
-                                  : item.priority === "medium"
-                                  ? "#d97706"
-                                  : "#15803d",
-                              fontSize: "11px",
-                              fontWeight: "700",
-                            }}
-                          >
-                            {item.priority.toUpperCase()}
-                          </span>
-                        </td>
-                        <td style={{ padding: "14px 16px", color: "#334155", fontWeight: "600" }}>
-                          {item.text}
-                        </td>
-                        <td style={{ padding: "14px 16px", color: "#334155" }}>
-                          <span
-                            style={{
-                              display: "inline-block",
-                              padding: "4px 8px",
-                              borderRadius: "6px",
-                              background: "rgba(59, 130, 246, 0.1)",
-                              color: "#2563eb",
-                              fontSize: "11px",
-                              fontWeight: "600",
-                            }}
-                          >
-                            {item.type.replace(/_/g, " ").toUpperCase()}
-                          </span>
-                        </td>
-                        <td style={{ padding: "14px 16px", color: "#64748b" }}>
-                          <a
-                            href={item.sourceUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{ color: "#3b82f6", textDecoration: "none", fontSize: "12px" }}
-                          >
-                            View →
-                          </a>
-                        </td>
-                        <td style={{ padding: "14px 16px", color: "#334155" }}>
-                          <button
-                            onClick={() => {
-                              fetch(`/api/claims/${item.id}`, {
-                                method: "PATCH",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ status: "accepted" }),
-                              });
-                              setClaims(claims.map((c) => (c.id === item.id ? { ...c, status: "accepted" } : c)));
-                              setActionItems(actionItems.map((a) => (a.id === item.id ? { ...a, status: "accepted" } : a)));
-                            }}
-                            style={{
-                              padding: "6px 12px",
-                              background: "#10b981",
-                              color: "white",
-                              border: "none",
-                              borderRadius: "6px",
-                              fontSize: "12px",
-                              fontWeight: "600",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Mark Done
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {actionItems.slice(0, 20).map((item) => {
+                      const priority = item.priority || priorityFor(item);
+                      return (
+                        <tr key={item.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                          <td style={{ padding: "14px 16px" }}><span style={{ fontWeight: 700, color: priority === "high" ? "#dc2626" : priority === "medium" ? "#d97706" : "#15803d" }}>{priority.toUpperCase()}</span></td>
+                          <td style={{ padding: "14px 16px", fontWeight: 600 }}>{item.text}</td>
+                          <td style={{ padding: "14px 16px" }}>{item.type.replace(/_/g, " ").toUpperCase()}</td>
+                          <td style={{ padding: "14px 16px" }}><Citation url={item.sourceUrl} /></td>
+                          <td style={{ padding: "14px 16px" }}>{item.redacted ? <span title={item.redactionReason || "Redacted"} style={{ color: "#b91c1c", fontWeight: 600 }}>Redacted ({item.redactionLevel})</span> : "Visible"}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -839,249 +398,50 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Claims Dashboard */}
-        <div style={{ marginBottom: "40px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h2 style={{ fontSize: "20px", fontWeight: "700", color: "#0f172a", margin: 0 }}>
-              All Claims &amp; Decisions
-            </h2>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <button
-                onClick={() => setFilterStatus("all")}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: "8px",
-                  border: "1px solid #cbd5e1",
-                  background: filterStatus === "all" ? "#3b82f6" : "white",
-                  color: filterStatus === "all" ? "white" : "#64748b",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  cursor: "pointer",
-                }}
-              >
-                All ({claims.length})
-              </button>
-              <button
-                onClick={() => setFilterStatus("open")}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: "8px",
-                  border: "1px solid #cbd5e1",
-                  background: filterStatus === "open" ? "#3b82f6" : "white",
-                  color: filterStatus === "open" ? "white" : "#64748b",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  cursor: "pointer",
-                }}
-              >
-                Open ({openCount})
-              </button>
-              <button
-                onClick={() => setFilterStatus("merged")}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: "8px",
-                  border: "1px solid #cbd5e1",
-                  background: filterStatus === "merged" ? "#3b82f6" : "white",
-                  color: filterStatus === "merged" ? "white" : "#64748b",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  cursor: "pointer",
-                }}
-              >
-                Merged ({mergedCount})
-              </button>
-              <button
-                onClick={() => setFilterStatus("leaver")}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: "8px",
-                  border: "1px solid #cbd5e1",
-                  background: filterStatus === "leaver" ? "#3b82f6" : "white",
-                  color: filterStatus === "leaver" ? "white" : "#64748b",
-                  fontSize: "12px",
-                  fontWeight: "600",
-                  cursor: "pointer",
-                }}
-              >
-                Leaver's Work
-              </button>
+        <div style={{ marginBottom: 40 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
+            <h2 style={{ fontSize: 20, fontWeight: 700, color: "#0f172a", margin: 0 }}>Claims & Decisions ({roleMeta.label})</h2>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[{ key: "all", label: `All (${claims.length})` }, { key: "open", label: `Open (${openCount})` }, { key: "merged", label: `Merged (${mergedCount})` }, { key: "leaver", label: "Leaver's Work" }].map((f) => (
+                <button key={f.key} onClick={() => setFilterStatus(f.key)} style={{ padding: "6px 14px", borderRadius: 8, border: "1px solid #cbd5e1", background: filterStatus === f.key ? "#3b82f6" : "white", color: filterStatus === f.key ? "white" : "#64748b", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>{f.label}</button>
+              ))}
             </div>
           </div>
-          <div
-            style={{
-              background: "white",
-              borderRadius: "16px",
-              boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.05)",
-              border: "1px solid #f1f5f9",
-              overflow: "hidden",
-            }}
-          >
+          <div style={{ background: "white", borderRadius: 16, border: "1px solid #f1f5f9", overflow: "hidden" }}>
             <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
                   <tr style={{ textAlign: "left", background: "#f8fafc", borderBottom: "2px solid #e2e8f0" }}>
-                    <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "11px", textTransform: "uppercase" }}>
-                      Claim
-                    </th>
-                    <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "11px", textTransform: "uppercase" }}>
-                      Type
-                    </th>
-                    <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "11px", textTransform: "uppercase" }}>
-                      Status
-                    </th>
-                    <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "11px", textTransform: "uppercase" }}>
-                      Confidence
-                    </th>
-                    <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "11px", textTransform: "uppercase" }}>
-                      Author
-                    </th>
-                    <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "11px", textTransform: "uppercase" }}>
-                      Source &amp; Proof
-                    </th>
-                    <th style={{ padding: "14px 16px", color: "#64748b", fontWeight: "700", fontSize: "11px", textTransform: "uppercase" }}>
-                      Action
-                    </th>
+                    <th style={{ padding: "14px 16px" }}>Claim</th>
+                    <th style={{ padding: "14px 16px" }}>Type</th>
+                    <th style={{ padding: "14px 16px" }}>Status</th>
+                    <th style={{ padding: "14px 16px" }}>Confidence</th>
+                    <th style={{ padding: "14px 16px" }}>Author</th>
+                    <th style={{ padding: "14px 16px" }}>Citation</th>
+                    <th style={{ padding: "14px 16px" }}>Redaction</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredClaims.slice(0, showAll ? undefined : 25).map((claim) => (
-                    <tr key={claim.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                      <td style={{ padding: "14px 16px", color: "#334155", fontWeight: "600" }}>
-                        {claim.text}
+                    <tr key={claim.id} style={{ borderBottom: "1px solid #f1f5f9", verticalAlign: "top" }}>
+                      <td style={{ padding: "14px 16px", color: "#334155", fontWeight: 600 }}>
+                        <div>{claim.text}</div>
+                        {claim.body && <div style={{ marginTop: 6, fontWeight: 400, color: "#475569", whiteSpace: "pre-wrap" }}>{claim.body.slice(0, 300)}{claim.body.length > 300 ? "..." : ""}</div>}
+                        {claim.redactionReason && <div style={{ marginTop: 6, fontSize: 12, color: "#b91c1c" }}>{claim.redactionReason}</div>}
                       </td>
-                      <td style={{ padding: "14px 16px", color: "#334155" }}>
-                        <span
-                          style={{
-                            display: "inline-block",
-                            padding: "4px 8px",
-                            borderRadius: "6px",
-                            background: `${typeColor(claim.type)}15`,
-                            color: typeColor(claim.type),
-                            fontSize: "11px",
-                            fontWeight: "600",
-                          }}
-                        >
-                          {claim.type.replace(/_/g, " ").toUpperCase()}
-                        </span>
+                      <td style={{ padding: "14px 16px" }}><span style={{ display: "inline-block", padding: "4px 8px", borderRadius: 6, background: `${typeColor(claim.type)}15`, color: typeColor(claim.type), fontSize: 11, fontWeight: 600 }}>{claim.type.replace(/_/g, " ").toUpperCase()}</span></td>
+                      <td style={{ padding: "14px 16px" }}><span style={{ display: "inline-block", padding: "4px 8px", borderRadius: 6, background: `${statusColor(claim.status)}15`, color: statusColor(claim.status), fontSize: 11, fontWeight: 600 }}>{String(claim.status || "").toUpperCase()}</span></td>
+                      <td style={{ padding: "14px 16px" }}>{typeof claim.confidence === "number" ? `${(claim.confidence * 100).toFixed(0)}%` : "-"}</td>
+                      <td style={{ padding: "14px 16px", color: "#64748b" }}>{claim.author || "Unknown"}{claim.isLeaver && <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "#ec4899", color: "white", fontSize: 10, fontWeight: 700 }}>LEAVER</span>}</td>
+                      <td style={{ padding: "14px 16px" }}>
+                        <Citation url={claim.sourceUrl} />
+                        {claim.proof?.type && <div style={{ marginTop: 4, fontSize: 10, color: "#64748b", background: "#f8fafc", padding: "2px 6px", borderRadius: 4, display: "inline-block" }}>{String(claim.proof.type).replace(/_/g, " ").toUpperCase()}</div>}
                       </td>
-                      <td style={{ padding: "14px 16px", color: "#334155" }}>
-                        <span
-                          style={{
-                            display: "inline-block",
-                            padding: "4px 8px",
-                            borderRadius: "6px",
-                            background: `${statusColor(claim.status)}15`,
-                            color: statusColor(claim.status),
-                            fontSize: "11px",
-                            fontWeight: "600",
-                          }}
-                        >
-                          {claim.status.toUpperCase()}
-                        </span>
-                      </td>
-                      <td style={{ padding: "14px 16px", color: "#334155" }}>
-                        {(claim.confidence * 100).toFixed(0)}%
-                      </td>
-                      <td style={{ padding: "14px 16px", color: "#64748b" }}>
-                        {claim.author || "Unknown"}
-                        {claim.isLeaver && (
-                          <span
-                            style={{
-                              display: "inline-block",
-                              marginLeft: "6px",
-                              padding: "2px 6px",
-                              borderRadius: "4px",
-                              background: "#ec4899",
-                              color: "white",
-                              fontSize: "10px",
-                              fontWeight: "700",
-                            }}
-                          >
-                            LEAVER
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ padding: "14px 16px", color: "#334155" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                          <a
-                            href={claim.sourceUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "4px",
-                              color: "#3b82f6",
-                              textDecoration: "none",
-                              fontSize: "12px",
-                              fontWeight: "600",
-                            }}
-                          >
-                            <span style={{ fontSize: "10px" }}>🔗</span> Source
-                          </a>
-                          {claim.proof && (
-                            <span
-                              style={{
-                                fontSize: "10px",
-                                color: "#64748b",
-                                background: "#f8fafc",
-                                padding: "2px 6px",
-                                borderRadius: "4px",
-                              }}
-                            >
-                              {claim.proof.type?.replace(/_/g, " ").toUpperCase()}
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td style={{ padding: "14px 16px", color: "#334155" }}>
-                        <button
-                          onClick={() => {
-                            const newStatus = claim.status === "accepted" ? "proposed" : "accepted";
-                            fetch(`/api/claims/${claim.id}`, {
-                              method: "PATCH",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ status: newStatus }),
-                            });
-                            setClaims(claims.map((c) => (c.id === claim.id ? { ...c, status: newStatus } : c)));
-                          }}
-                          style={{
-                            padding: "6px 14px",
-                            background: claim.status === "accepted" ? "#64748b" : "#3b82f6",
-                            color: "white",
-                            border: "none",
-                            borderRadius: "6px",
-                            fontSize: "12px",
-                            fontWeight: "600",
-                            cursor: "pointer",
-                          }}
-                        >
-                          {claim.status === "accepted" ? "Reopen" : "Accept"}
-                        </button>
-                      </td>
+                      <td style={{ padding: "14px 16px" }}>{claim.redacted ? <span title={claim.redactionReason || "Redacted"} style={{ color: "#b91c1c", fontWeight: 700 }}>Redacted ({claim.redactionLevel || "partial"})</span> : <span style={{ color: "#15803d", fontWeight: 600 }}>Visible</span>}</td>
                     </tr>
                   ))}
                   {filteredClaims.length > 25 && !showAll && (
-                    <tr>
-                      <td colSpan={7} style={{ padding: "16px", textAlign: "center" }}>
-                        <button
-                          onClick={() => setShowAll(true)}
-                          style={{
-                            padding: "8px 20px",
-                            background: "#f8fafc",
-                            color: "#3b82f6",
-                            border: "1px solid #cbd5e1",
-                            borderRadius: "8px",
-                            fontSize: "13px",
-                            fontWeight: "600",
-                            cursor: "pointer",
-                          }}
-                        >
-                          Show all {filteredClaims.length} claims
-                        </button>
-                      </td>
-                    </tr>
+                    <tr><td colSpan={7} style={{ padding: 16, textAlign: "center" }}><button onClick={() => setShowAll(true)} style={{ padding: "8px 20px", background: "#f8fafc", color: "#3b82f6", border: "1px solid #cbd5e1", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>Show all {filteredClaims.length} claims</button></td></tr>
                   )}
                 </tbody>
               </table>

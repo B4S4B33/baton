@@ -56,6 +56,18 @@ export async function initSchema() {
       )
     `);
 
+    await query(`
+      CREATE TABLE IF NOT EXISTS handover_acknowledgements (
+        id SERIAL PRIMARY KEY,
+        handover_version_id VARCHAR(255) NOT NULL,
+        role VARCHAR(50) NOT NULL,
+        acknowledged_by VARCHAR(255),
+        acknowledged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        notes TEXT,
+        UNIQUE (handover_version_id, role)
+      )
+    `);
+
     console.log("Database schema initialized successfully");
   } catch (e) {
     console.warn("Schema initialization failed:", e.message);
