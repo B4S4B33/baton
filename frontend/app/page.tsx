@@ -85,7 +85,15 @@ export default function Home() {
   const [ackBy, setAckBy] = useState("");
   const [ackNotes, setAckNotes] = useState("");
   const [ackLoading, setAckLoading] = useState(false);
-  const [ackMessage, setAckMessage] = useState<string | null>(null);
+const [ackMessage, setAckMessage] = useState<string | null>(null);
+
+  // Version comparison state
+  const [versions, setVersions] = useState<{ id: string; shortId: string; version: string; subject: string; body: string; date: string; prRef: string | null }[]>([]);
+  const [versionBase, setVersionBase] = useState("");
+  const [versionCompare, setVersionCompare] = useState("");
+  const [versionDiff, setVersionDiff] = useState<any>(null);
+  const [versionLoading, setVersionLoading] = useState(false);
+  const [versionError, setVersionError] = useState<string | null>(null);
 
   const extractRepo = (url: string): string | null => {
     const match = url.match(/github\.com\/([^\/]+)\/([^\/]+?)(?:\.git)?\/?$/);
@@ -168,23 +176,52 @@ export default function Home() {
     }
   };
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const viewRes = await fetch(`/api/handover/view?role=${encodeURIComponent(selectedRole)}&handoverVersionId=default`);
-        const data = await viewRes.json();
-        if (viewRes.ok && ((data.claims && data.claims.length > 0) || (data.actionItems && data.actionItems.length > 0))) {
-          setClaims(Array.isArray(data.claims) ? data.claims : []);
-          setStats(data.stats || null);
-          setActionItems(Array.isArray(data.actionItems) ? data.actionItems : []);
-          setLeaverActivity(data.leaverActivity || null);
-          setAcknowledgements(Array.isArray(data.acknowledgements) ? data.acknowledgements : []);
-          setView("dashboard");
-        }
-      } catch {}
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const loadVersions = async () => {
+    setVersionError(null);
+    try {
+      const res = await fetch("/api/versions");
+      if (!res.ok) throw new Error("Failed to load versions");
+      const data = await res.json();
+      setVersions(Array.isArray(data.versions) ? data.versions : []);
+    } catch (e: any) {
+      setVersionError(e.message || "Failed to load versions");
+    }
+  };
+
+  const compareVersions = async () => {
+    if (!versionBase || !versionCompare) { setVersionError("Please select both versions"); return; }
+    setVersionLoading(true);
+    setVersionError(null);
+    setVersionDiff(null);
+    try {
+      const res = await fetch(`/api/version-diff?base=${encodeURIComponent(versionBase)}&compare=${encodeURIComponent(versionCompare)}`);
+      if (!res.ok) throw new Error(`Comparison failed: ${res.statusText}`);
+      setVersionDiff(await res.json());
+    } catch (e: any) {
+      setVersionError(e.message || "Failed to compare versions");
+    } finally {
+      setVersionLoading(false);
+    }
+  };
+
+    useEffect(() => {
+      (async () => {
+        try {
+          const viewRes = await fetch(`/api/handover/view?role=${encodeURIComponent(selectedRole)}&handoverVersionId=default`);
+          const data = await viewRes.json();
+          if (viewRes.ok && ((data.claims && data.claims.length > 0) || (data.actionItems && data.actionItems.length > 0))) {
+            setClaims(Array.isArray(data.claims) ? data.claims : []);
+            setStats(data.stats || null);
+            setActionItems(Array.isArray(data.actionItems) ? data.actionItems : []);
+            setLeaverActivity(data.leaverActivity || null);
+            setAcknowledgements(Array.isArray(data.acknowledgements) ? data.acknowledgements : []);
+            setView("dashboard");
+          }
+        } catch {}
+        try { await loadVersions(); } catch {}
+      })();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
   useEffect(() => {
     if (view !== "dashboard") return;
@@ -482,6 +519,154 @@ export default function Home() {
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+
+        {/* Version Comparison Section */}
+        <div style={{ marginBottom: 40 }}>
+          <div style={{ background: "white", borderRadius: 16, border: "1px solid #f1f5f9", padding: 24 }}>
+            <h2 style={{ fontSize: 20, fontWeight: 700, color: "#0f172a", margin: "0 0 16px" }}>On-Demand Code Version Comparison</h2>
+            <p style={{ fontSize: 14, color: "#64748b", margin: "0 0 20px" }}>
+              Select two versions to surface architecturally significant changes linked to their authorising PR or ticket.
+            </p>
+
+            {versionError && <div style={{ marginBottom: 16, color: "#dc2626", background: "#fef2f2", padding: 12, borderRadius: 8 }}>{versionError}</div>}
+
+            <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20, alignItems: "flex-end" }}>
+              <div style={{ flex: 1, minWidth: 260, display: "flex", flexDirection: "column", gap: 8 }}>
+                <label style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}>Base Version (older)</label>
+                <select
+                  value={versionBase}
+                  onChange={(e) => setVersionBase(e.target.value)}
+                  style={{ width: "100%", padding: "10px 12px", border: "1px solid #cbd5e1", borderRadius: 8, background: "white", fontSize: 13 }}
+                >
+                  <option value="">Select base version</option>
+                  {versions.map((v) => (
+                    <option key={v.id} value={v.id}>{v.version} · {v.shortId} — {v.subject}</option>
+                  ))}
+                </select>
+              </div>
+              <div style={{ flex: 1, minWidth: 260, display: "flex", flexDirection: "column", gap: 8 }}>
+                <label style={{ fontSize: 13, fontWeight: 600, color: "#334155" }}>Compare Version (newer)</label>
+                <select
+                  value={versionCompare}
+                  onChange={(e) => setVersionCompare(e.target.value)}
+                  style={{ width: "100%", padding: "10px 12px", border: "1px solid #cbd5e1", borderRadius: 8, background: "white", fontSize: 13 }}
+                >
+                  <option value="">Select compare version</option>
+                  {versions.map((v) => (
+                    <option key={v.id} value={v.id}>{v.version} · {v.shortId} — {v.subject}</option>
+                  ))}
+                </select>
+              </div>
+              <button
+                onClick={compareVersions}
+                disabled={versionLoading || !versionBase || !versionCompare}
+                style={{ padding: "10px 24px", borderRadius: 8, border: "none", background: versionLoading || !versionBase || !versionCompare ? "#94a3b8" : "linear-gradient(135deg,#3b82f6,#8b5cf6)", color: "white", fontWeight: 700, cursor: (versionLoading || !versionBase || !versionCompare) ? "not-allowed" : "pointer", fontSize: 14 }}
+              >
+                {versionLoading ? "Comparing..." : "Compare Versions"}
+              </button>
+            </div>
+
+            {versionDiff && (
+              <div style={{ marginTop: 24, borderTop: "1px solid #e2e8f0", paddingTop: 20 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
+                  <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 16, minWidth: 140 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", textTransform: "uppercase" }}>Base</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#0f172a" }}>{versionDiff.base.shortId}</div>
+                    <div style={{ fontSize: 12, color: "#64748b" }}>{versionDiff.base.id.substring(0, 7)}</div>
+                  </div>
+                  <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 16, minWidth: 140 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", textTransform: "uppercase" }}>Compare</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#0f172a" }}>{versionDiff.compare.shortId}</div>
+                    <div style={{ fontSize: 12, color: "#64748b" }}>{versionDiff.compare.id.substring(0, 7)}</div>
+                  </div>
+                  <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 10, padding: 16, minWidth: 140 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#166534", textTransform: "uppercase" }}>Files Changed</div>
+                    <div style={{ fontSize: 24, fontWeight: 800, color: "#166534" }}>{versionDiff.summary.totalFiles}</div>
+                  </div>
+                  <div style={{ background: "#fffbeb", border: "1px solid #fcd34d", borderRadius: 10, padding: 16, minWidth: 140 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#92400e", textTransform: "uppercase" }}>Significant</div>
+                    <div style={{ fontSize: 24, fontWeight: 800, color: "#92400e" }}>{versionDiff.summary.significantFiles}</div>
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12, marginBottom: 20 }}>
+                  <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 14 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", textTransform: "uppercase" }}>Insertions</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: "#16a34a" }}>{versionDiff.summary.insertions}</div>
+                  </div>
+                  <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 14 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", textTransform: "uppercase" }}>Deletions</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: "#dc2626" }}>{versionDiff.summary.deletions}</div>
+                  </div>
+                  <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 14 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", textTransform: "uppercase" }}>Commits</div>
+                    <div style={{ fontSize: 20, fontWeight: 800, color: "#2563eb" }}>{versionDiff.commits.length}</div>
+                  </div>
+                </div>
+
+                {versionDiff.significantChanges.length > 0 ? (
+                  <>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a", marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 16 }}>🏗️</span>
+                      Architecturally Significant Changes
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12, marginBottom: 20 }}>
+                      {versionDiff.significantChanges.map((f: any) => (
+                        <div key={f.path} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.05)" }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: "#3b82f6", wordBreak: "break-all", marginBottom: 6 }}>{f.path}</div>
+                          <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", color: f.status === "M" ? "#d97706" : f.status === "A" ? "#16a34a" : "#dc2626", marginBottom: 6 }}>{f.status === "M" ? "Modified" : f.status === "A" ? "Added" : f.status === "D" ? "Deleted" : f.status === "R" ? "Renamed" : f.status}</div>
+                          <div style={{ fontSize: 13, color: "#475569", marginBottom: 8 }}>{f.significance}</div>
+                          {f.previousPath && <div style={{ fontSize: 11, color: "#64748b", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 6, padding: "8px 10px", marginBottom: 8 }}>{`Renamed from: ${f.previousPath}`}</div>}
+                          <div style={{ fontSize: 12, color: "#334155" }}>
+                            <span style={{ fontWeight: 700, color: "#0f172a" }}>Authorising PR/Ticket:</span>{" "}
+                            <span style={{ color: "#64748b" }}>{versionDiff.commits.find((c: any) => c.prRef)?.prRef || "Not referenced in commit message"}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#0f172a", marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 16 }}>📜</span>
+                      Commits Between Versions
+                    </div>
+                    <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden" }}>
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                          <thead>
+                            <tr style={{ textAlign: "left", background: "#f8fafc", borderBottom: "2px solid #e2e8f0" }}>
+                              <th style={{ padding: "12px 16px" }}>Commit</th>
+                              <th style={{ padding: "12px 16px" }}>Subject</th>
+                              <th style={{ padding: "12px 16px" }}>PR / Ticket</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {versionDiff.commits.map((c: any) => (
+                              <tr key={c.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                                <td style={{ padding: "12px 16px", fontFamily: "monospace", fontSize: 12, color: "#64748b" }}>{c.shortId}</td>
+                                <td style={{ padding: "12px 16px", color: "#334155" }}>{c.subject}</td>
+                                <td style={{ padding: "12px 16px", fontSize: 12 }}>
+                                  {c.prRef ? (
+                                    <span style={{ color: "#2563eb", fontWeight: 600 }}>{c.prRef}</span>
+                                  ) : (
+                                    <span style={{ color: "#94a3b8" }}>Not referenced</span>
+                                  )}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 24, textAlign: "center", color: "#64748b" }}>
+                    No architecturally significant changes detected between these versions.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
