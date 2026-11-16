@@ -599,4 +599,248 @@ router.post("/clear", async (req, res) => {
   }
 });
 
+router.post("/demo-data", async (req, res) => {
+  try {
+    claims.length = 0;
+    sources.length = 0;
+    Object.assign(stats, {
+      totalPrs: 0, mergedPrs: 0, openPrs: 0, closedPrs: 0,
+      totalIssues: 0, openIssues: 0, closedIssues: 0,
+      totalComments: 0, leaverActivities: 0,
+    });
+    await clearAllClaims();
+
+    const now = new Date().toISOString();
+    const leaver = "alex-dev";
+    const demoClaims = [
+      {
+        id: "demo-pr-42",
+        type: "merged_pr",
+        text: "Refactor authentication service to use OAuth2 instead of JWT",
+        confidence: 0.9,
+        status: "merged",
+        sourceUrl: "https://github.com/owner/repo/pull/42",
+        sourceType: "pull_request",
+        createdAt: now,
+        updatedAt: now,
+        author: "sarah-pm",
+        isLeaver: false,
+        body: "This PR replaces the custom JWT auth with OAuth2 flow. All login endpoints updated.",
+        labels: ["enhancement", "auth"],
+        assignees: ["sarah-pm"],
+        reviewers: ["alex-dev"],
+        proof: { type: "pull_request", number: 42, state: "merged", url: "https://github.com/owner/repo/pull/42", author: "sarah-pm", isLeaver: false },
+      },
+      {
+        id: "demo-pr-87",
+        type: "open_pr",
+        text: "Add rate limiting to API endpoints",
+        confidence: 0.85,
+        status: "open",
+        sourceUrl: "https://github.com/owner/repo/pull/87",
+        sourceType: "pull_request",
+        createdAt: now,
+        updatedAt: now,
+        author: leaver,
+        isLeaver: true,
+        body: "Implement Redis-based rate limiting on all public API routes.",
+        labels: ["enhancement", "security"],
+        assignees: [leaver],
+        reviewers: ["mike-dev"],
+        proof: { type: "pull_request", number: 87, state: "open", url: "https://github.com/owner/repo/pull/87", author: leaver, isLeaver: true },
+      },
+      {
+        id: "demo-issue-15",
+        type: "open_issue",
+        text: "Database connection pool exhaustion under load",
+        confidence: 0.9,
+        status: "open",
+        sourceUrl: "https://github.com/owner/repo/issues/15",
+        sourceType: "issue",
+        createdAt: now,
+        updatedAt: now,
+        author: "ops-team",
+        isLeaver: false,
+        body: "PostgreSQL pool hits max connections during peak traffic. Need to increase pool size or add connection recycling.",
+        labels: ["bug", "database", "high-priority"],
+        assignees: ["ops-team"],
+        proof: { type: "issue", number: 15, state: "open", url: "https://github.com/owner/repo/issues/15", author: "ops-team", isLeaver: false },
+      },
+      {
+        id: "demo-decision-1",
+        type: "decision",
+        text: "Adopt PostgreSQL as primary database, deprecate MongoDB",
+        confidence: 0.95,
+        status: "accepted",
+        sourceUrl: "https://github.com/owner/repo/pull/31",
+        sourceType: "pull_request",
+        createdAt: now,
+        updatedAt: now,
+        author: "cto",
+        isLeaver: false,
+        body: "Architecture decision: migrate all services to PostgreSQL. MongoDB to be decommissioned by Q3.",
+        labels: ["architecture", "decision"],
+        assignees: [],
+        reviewers: ["cto", "sarah-pm"],
+        proof: { type: "architecture_decision", source: "pull_request", url: "https://github.com/owner/repo/pull/31" },
+      },
+      {
+        id: "demo-task-1",
+        type: "task",
+        text: "Update API documentation for v2 endpoints",
+        confidence: 0.8,
+        status: "open",
+        sourceUrl: "https://github.com/owner/repo/issues/23",
+        sourceType: "issue",
+        createdAt: now,
+        updatedAt: now,
+        author: "tech-writer",
+        isLeaver: false,
+        body: "Document all v2 API endpoints including request/response schemas and examples.",
+        labels: ["documentation"],
+        assignees: ["tech-writer"],
+        proof: { type: "issue", number: 23, state: "open", url: "https://github.com/owner/repo/issues/23", author: "tech-writer", isLeaver: false },
+      },
+      {
+        id: "demo-risk-1",
+        type: "risk",
+        text: "Third-party payment API may exceed rate limits during holiday season",
+        confidence: 0.7,
+        status: "open",
+        sourceUrl: "https://github.com/owner/repo/issues/44",
+        sourceType: "issue",
+        createdAt: now,
+        updatedAt: now,
+        author: "sarah-pm",
+        isLeaver: false,
+        body: "Stripe API rate limit of 100 req/sec may be exceeded during Black Friday traffic. Consider implementing request queuing.",
+        labels: ["risk", "payment", "external"],
+        assignees: ["backend-team"],
+        proof: { type: "issue", number: 44, state: "open", url: "https://github.com/owner/repo/issues/44", author: "sarah-pm", isLeaver: false },
+      },
+      {
+        id: "demo-meeting-1",
+        type: "decision",
+        text: "Switch from Slack to Microsoft Teams for team communication",
+        confidence: 0.6,
+        status: "proposed",
+        sourceUrl: "https://meet.example.com/team-sync-2026-11-01",
+        sourceType: "meeting_summary",
+        sourceProvider: "zoom",
+        meetingId: "zoom-12345",
+        sourceAuthority: "low",
+        corroborated: false,
+        corroborationCount: 0,
+        needsCorroboration: true,
+        createdAt: now,
+        updatedAt: now,
+        author: "sarah-pm",
+        isLeaver: false,
+        body: "Team agreed to evaluate Microsoft Teams as replacement for Slack. Trial period of 2 weeks starting next month.",
+        proof: { type: "meeting_summary", sourceArtifactType: "meeting_summary", sourceUrl: "https://meet.example.com/team-sync-2026-11-01", meetingId: "zoom-12345" },
+      },
+      {
+        id: "demo-meeting-2",
+        type: "task",
+        text: "Create onboarding checklist for new hires",
+        confidence: 0.65,
+        status: "proposed",
+        sourceUrl: "https://meet.example.com/onboarding-plan-2026-10-15",
+        sourceType: "meeting_summary",
+        sourceProvider: "google_meet",
+        meetingId: "gm-67890",
+        sourceAuthority: "low",
+        corroborated: true,
+        corroborationCount: 1,
+        needsCorroboration: false,
+        createdAt: now,
+        updatedAt: now,
+        author: "hr-lead",
+        isLeaver: false,
+        body: "HR to create a comprehensive onboarding checklist including equipment, access, and training materials.",
+        proof: { type: "meeting_summary", sourceArtifactType: "meeting_summary", sourceUrl: "https://meet.example.com/onboarding-plan-2026-10-15", meetingId: "gm-67890" },
+      },
+      {
+        id: "demo-redacted-1",
+        type: "pr_comment",
+        text: "The database password is admin123 and the API key is sk-live_xyz789",
+        confidence: 0.8,
+        status: "commented",
+        sourceUrl: "https://github.com/owner/repo/pull/42#discussion_r100",
+        sourceType: "pull_request_comment",
+        createdAt: now,
+        updatedAt: now,
+        author: leaver,
+        isLeaver: true,
+        body: "Shared credentials in PR comment - should be removed.",
+        labels: [],
+        assignees: [],
+        reviewers: [],
+        proof: { type: "pull_request_comment", commentId: "r100", prNumber: 42, author: leaver, isLeaver: true },
+      },
+      {
+        id: "demo-closed-issue-1",
+        type: "closed_issue",
+        text: "Fix broken image links in user profile pages",
+        confidence: 0.85,
+        status: "closed",
+        sourceUrl: "https://github.com/owner/repo/issues/56",
+        sourceType: "issue",
+        createdAt: now,
+        updatedAt: now,
+        author: "frontend-team",
+        isLeaver: false,
+        body: "User profile images return 404 due to incorrect CDN path. Fixed by updating image URL prefix.",
+        labels: ["bug", "frontend"],
+        assignees: ["frontend-team"],
+        proof: { type: "issue", number: 56, state: "closed", url: "https://github.com/owner/repo/issues/56", author: "frontend-team", isLeaver: false },
+      },
+    ];
+
+    const demoSources = [
+      { url: "https://github.com/owner/repo/pull/42", type: "pull_request", content: "Refactor authentication service to use OAuth2 instead of JWT", author: "sarah-pm" },
+      { url: "https://github.com/owner/repo/pull/87", type: "pull_request", content: "Add rate limiting to API endpoints", author: leaver },
+      { url: "https://github.com/owner/repo/issues/15", type: "issue", content: "Database connection pool exhaustion under load", author: "ops-team" },
+      { url: "https://github.com/owner/repo/pull/31", type: "pull_request", content: "Adopt PostgreSQL as primary database, deprecate MongoDB", author: "cto" },
+      { url: "https://github.com/owner/repo/issues/23", type: "issue", content: "Update API documentation for v2 endpoints", author: "tech-writer" },
+      { url: "https://github.com/owner/repo/issues/44", type: "issue", content: "Third-party payment API may exceed rate limits during holiday season", author: "sarah-pm" },
+      { url: "https://meet.example.com/team-sync-2026-11-01", type: "meeting_summary", content: "Switch from Slack to Microsoft Teams for team communication", author: "sarah-pm", provider: "zoom", meetingId: "zoom-12345", sourceAuthority: "low", occurredAt: now },
+      { url: "https://meet.example.com/onboarding-plan-2026-10-15", type: "meeting_summary", content: "Create onboarding checklist for new hires", author: "hr-lead", provider: "google_meet", meetingId: "gm-67890", sourceAuthority: "low", occurredAt: now },
+    ];
+
+    for (const claim of demoClaims) {
+      await createClaim(claim);
+      if (!claims.find((c) => c.id === claim.id)) claims.push(claim);
+    }
+    for (const source of demoSources) {
+      await createSource(source);
+    }
+
+    // Recompute stats from claims
+    const allClaims = await getAllClaims();
+    Object.assign(stats, {
+      totalPrs: allClaims.filter((c) => c.type.includes("pr")).length,
+      mergedPrs: allClaims.filter((c) => c.type === "merged_pr").length,
+      openPrs: allClaims.filter((c) => c.type === "open_pr").length,
+      closedPrs: allClaims.filter((c) => c.type === "closed_pr").length,
+      totalIssues: allClaims.filter((c) => c.type.includes("issue")).length,
+      openIssues: allClaims.filter((c) => c.type === "open_issue").length,
+      closedIssues: allClaims.filter((c) => c.type === "closed_issue").length,
+      totalComments: allClaims.filter((c) => c.type.includes("comment")).length,
+      leaverActivities: allClaims.filter((c) => c.isLeaver).length,
+    });
+
+    res.json({
+      ok: true,
+      message: "Demo data seeded successfully",
+      claimsCreated: demoClaims.length,
+      sourcesCreated: demoSources.length,
+      stats,
+    });
+  } catch (e) {
+    console.error("Demo data seed failed:", e);
+    res.status(500).json({ error: e.message || "Failed to seed demo data" });
+  }
+});
+
 export default router;
