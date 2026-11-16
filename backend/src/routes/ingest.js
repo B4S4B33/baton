@@ -582,4 +582,21 @@ router.get("/action-items", async (req, res) => {
   res.json({ actionItems, count: actionItems.length });
 });
 
+router.post("/clear", async (req, res) => {
+  try {
+    claims.length = 0;
+    sources.length = 0;
+    Object.assign(stats, {
+      totalPrs: 0, mergedPrs: 0, openPrs: 0, closedPrs: 0,
+      totalIssues: 0, openIssues: 0, closedIssues: 0,
+      totalComments: 0, leaverActivities: 0,
+    });
+    await clearAllClaims();
+    res.json({ ok: true, message: "All claims and sources cleared" });
+  } catch (e) {
+    console.error("Clear failed:", e);
+    res.status(500).json({ error: e.message || "Failed to clear data" });
+  }
+});
+
 export default router;

@@ -204,20 +204,26 @@ const [ackMessage, setAckMessage] = useState<string | null>(null);
     }
   };
 
+  const clearData = async () => {
+    setVersionError(null);
+    try {
+      const res = await fetch("/api/clear", { method: "POST" });
+      if (!res.ok) throw new Error("Failed to clear data");
+      setClaims([]);
+      setStats(null);
+      setActionItems([]);
+      setLeaverActivity(null);
+      setAcknowledgements([]);
+      setView("landing");
+    } catch (e: any) {
+      setVersionError(e.message || "Failed to clear data");
+    }
+  };
+
     useEffect(() => {
+      // Load version list on mount for the version comparison dropdown.
+      // Do NOT auto-switch to dashboard — the user must explicitly ingest a repo.
       (async () => {
-        try {
-          const viewRes = await fetch(`/api/handover/view?role=${encodeURIComponent(selectedRole)}&handoverVersionId=default`);
-          const data = await viewRes.json();
-          if (viewRes.ok && ((data.claims && data.claims.length > 0) || (data.actionItems && data.actionItems.length > 0))) {
-            setClaims(Array.isArray(data.claims) ? data.claims : []);
-            setStats(data.stats || null);
-            setActionItems(Array.isArray(data.actionItems) ? data.actionItems : []);
-            setLeaverActivity(data.leaverActivity || null);
-            setAcknowledgements(Array.isArray(data.acknowledgements) ? data.acknowledgements : []);
-            setView("dashboard");
-          }
-        } catch {}
         try { await loadVersions(); } catch {}
       })();
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -320,6 +326,7 @@ const [ackMessage, setAckMessage] = useState<string | null>(null);
             <button onClick={() => setView("landing")} style={{ background: "rgba(255,255,255,0.1)", color: "white", border: "1px solid rgba(255,255,255,0.2)", padding: "10px 20px", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>New Analysis</button>
             <button onClick={() => loadRoleView(selectedRole)} style={{ background: "#3b82f6", color: "white", border: "none", padding: "10px 20px", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>Refresh View</button>
             <button onClick={runValidation} disabled={validationLoading} style={{ background: validationLoading ? "#94a3b8" : "#10b981", color: "white", border: "none", padding: "10px 20px", borderRadius: 8, fontWeight: 600, cursor: validationLoading ? "not-allowed" : "pointer" }}>{validationLoading ? "Validating..." : "Run Validation"}</button>
+            <button onClick={clearData} style={{ background: "#dc2626", color: "white", border: "none", padding: "10px 20px", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}>Clear All Data</button>
           </div>
         </div>
       </header>
