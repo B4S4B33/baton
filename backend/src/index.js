@@ -8,6 +8,7 @@ import ingestRoute from "./routes/ingest.js";
 import driveRoute from "./routes/drive.js";
 import validateRoute from "./routes/validate.js";
 import handoverRoute from "./routes/handover.js";
+import meetingsRoute from "./routes/meetings.js";
 import { closeDriver } from "./db/neo4j.js";
 import { initSchema } from "./db/schema.js";
 import { closePool } from "./db/postgres.js";
@@ -27,6 +28,7 @@ app.use("/api", ingestRoute);
 app.use("/api", driveRoute);
 app.use("/api", validateRoute);
 app.use("/api", handoverRoute);
+app.use("/api", meetingsRoute);
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok", time: new Date().toISOString() });

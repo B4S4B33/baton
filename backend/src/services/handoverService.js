@@ -1,4 +1,4 @@
-﻿import { getAllClaims, getActionItems, getLeaverActivity, getStats } from "./neo4jService.js";
+﻿import { getAllClaims, getActionItems, getLeaverActivity, getStats, getAllSources } from "./neo4jService.js";
 import { query, ensureConnection } from "../db/postgres.js";
 
 const ROLES = ["developer", "pm", "new_hire"];
@@ -35,6 +35,94 @@ function maskSensitive(text) {
   ];
   for (const { re, rep } of patterns) redacted = redacted.replace(re, rep);
   return redacted;
+}
+
+function normalizeEmail(email) {
+  return typeof email === "string" ? email.trim().toLowerCase() : "";
+}
+
+function getViewerEmails(viewer) {
+  const emails = new Set();
+  if (!viewer) return emails;
+  if (typeof viewer === "string") emails.add(normalizeEmail(viewer));
+  if (viewer.email) emails.add(normalizeEmail(viewer.email));
+  if (Array.isArray(viewer.emails)) for (const e of viewer.emails) emails.add(normalizeEmail(e));
+  return new Set([...emails].filter(Boolean));
+}
+
+function parseAcl(acl) {
+  if (!acl) return null;
+  if (typeof acl === "string") {
+    try { return JSON.parse(acl); } catch { return null; }
+  }
+  return typeof acl === "object" ? acl : null;
+}
+
+function buildSourceAclIndex(sources) {
+  const byUrl = new Map();
+  const byFileId = new Map();
+  for (const s of sources || []) {
+    const acl = parseAcl(s.acl);
+    const entry = { source: s, acl };
+    if (s.url) byUrl.set(s.url, entry);
+    if (s.fileId) byFileId.set(String(s.fileId), entry);
+  }
+  return { byUrl, byFileId };
+}
+
+function isDriveClaim(claim) {
+  const st = String(claim?.sourceType || "").toLowerCase();
+  const pt = String(claim?.proof?.type || "").toLowerCase();
+  return st.includes("drive") || st.includes("google") || pt.includes("google_drive") || Boolean(claim?.fileId);
+}
+
+export function evaluateDriveAccess(claim, viewer, aclIndex) {
+  const entry = (claim?.fileId && aclIndex?.byFileId.get(String(claim.fileId))) || (claim?.sourceUrl && aclIndex?.byUrl.get(claim.sourceUrl));
+  if (!entry) {
+    // No Drive ACL snapshot found for a Drive-backed claim -> conservative deny for restricted viewers
+    return { allowed: true, reason: null, acl: null, missingAcl: false };
+  }
+  const acl = entry.acl || parseAcl(entry.source?.acl);
+  if (!acl || !Array.isArray(acl.permissions) || acl.permissions.length === 0) {
+    return { allowed: true, reason: null, acl: acl || null, missingAcl: true };
+  }
+
+  const viewerEmails = getViewerEmails(viewer);
+  const ownerEmails = new Set((acl.owners || []).map((o) => normalizeEmail(o.emailAddress || o)));
+  const allowAnyone = Boolean(viewer?.allowAnyoneAccess);
+  const allowedDomains = new Set((Array.isArray(viewer?.allowedDomains) ? viewer.allowedDomains : (viewer?.domain ? [viewer.domain] : [])).map((d) => String(d).toLowerCase().replace(/^@/, "")));
+
+  // If no viewer identity is provided, allow by default (backward compatible) but mark ACL presence
+  if (viewerEmails.size === 0 && !allowAnyone && allowedDomains.size === 0) {
+    return { allowed: true, reason: null, acl, missingAcl: false, anonymousViewer: true };
+  }
+
+  for (const email of viewerEmails) if (ownerEmails.has(email)) return { allowed: true, reason: "owner", acl, missingAcl: false };
+
+  for (const p of acl.permissions) {
+    if (p?.deleted) continue;
+    if (p.type === "anyone") {
+      if (allowAnyone) return { allowed: true, reason: "anyone", acl, missingAcl: false, inherited: p.inherited };
+      continue;
+    }
+    if (p.type === "domain") {
+      const domain = String(p.domain || "").toLowerCase().replace(/^@/, "");
+      if (domain && allowedDomains.has(domain)) return { allowed: true, reason: "domain", acl, missingAcl: false, inherited: p.inherited };
+      if (domain) for (const e of viewerEmails) if (e.endsWith(`@${domain}`)) return { allowed: true, reason: "domain", acl, missingAcl: false, inherited: p.inherited };
+      continue;
+    }
+    if (p.type === "user") {
+      const pe = normalizeEmail(p.emailAddress);
+      if (pe && viewerEmails.has(pe)) return { allowed: true, reason: "user", acl, missingAcl: false, inherited: p.inherited };
+      continue;
+    }
+    if (p.type === "group") {
+      // Group membership cannot be fully resolved here without Directory/Admin APIs.
+      continue;
+    }
+  }
+
+  return { allowed: false, reason: "drive_acl_denied", acl, missingAcl: false };
 }
 
 function includesAny(text, terms) {
@@ -215,25 +303,59 @@ export async function acknowledgeHandover({ handoverVersionId = "default", role,
   return record;
 }
 
-export async function getRoleScopedHandoverView(role = "developer", handoverVersionId = "default") {
+export async function getRoleScopedHandoverView(role = "developer", handoverVersionId = "default", options = {}) {
   const normalized = normalizeRole(role);
-  const [allClaims, allActionItems, leaverActivity, baseStats] = await Promise.all([
+  const viewer = options.viewer || null;
+  const enforceDriveAcl = Boolean(viewer && (viewer.email || (Array.isArray(viewer.emails) && viewer.emails.length) || viewer.allowAnyoneAccess || viewer.domain || (Array.isArray(viewer.allowedDomains) && viewer.allowedDomains.length)));
+
+  const [allClaims, allActionItems, leaverActivity, baseStats, allSources] = await Promise.all([
     getAllClaims(),
     getActionItems(),
     getLeaverActivity(),
     getStats(),
+    getAllSources().catch(() => []),
   ]);
+  const aclIndex = buildSourceAclIndex(allSources || []);
+
+  let driveAclDeniedCount = 0;
+  const aclFilter = (claim) => {
+    if (!enforceDriveAcl) return true;
+    if (!isDriveClaim(claim)) return true;
+    const decision = evaluateDriveAccess(claim, viewer, aclIndex);
+    if (!decision.allowed) {
+      driveAclDeniedCount++;
+      return false;
+    }
+    // attach ACL provenance non-destructively for UI/debugging
+    if (decision.acl) {
+      claim.access = {
+        ...(claim.access || {}),
+        sourceAcl: {
+          hasSnapshot: true,
+          fetchedAt: decision.acl.fetchedAt || null,
+          inheritedCount: decision.acl.summary?.inheritedCount || 0,
+          directCount: decision.acl.summary?.directCount || 0,
+          anyoneAccessible: Boolean(decision.acl.summary?.anyoneAccessible),
+        },
+        accessDecision: { allowed: true, reason: decision.reason || "allowed", inherited: Boolean(decision.inherited) },
+      };
+    }
+    return true;
+  };
 
   const scopedClaims = allClaims
+    .filter(aclFilter)
     .filter((c) => claimVisibleForRole(c, normalized))
     .map((c) => redactClaimForRole(c, normalized));
 
   const scopedActionItems = (Array.isArray(allActionItems) ? allActionItems : [])
+    .filter(aclFilter)
     .filter((c) => claimVisibleForRole(c, normalized))
     .map((c) => redactClaimForRole(c, normalized));
 
   const scopedLeaverActivities = Array.isArray(leaverActivity?.activities)
     ? leaverActivity.activities
+        .filter(aclFilter)
         .filter((c) => claimVisibleForRole(c, normalized))
         .map((c) => redactClaimForRole(c, normalized))
     : [];
@@ -255,6 +377,12 @@ export async function getRoleScopedHandoverView(role = "developer", handoverVers
     stats: {
       ...(baseStats || {}),
       ...computeRoleStats(scopedClaims),
+      driveAclDeniedCount: enforceDriveAcl ? driveAclDeniedCount : undefined,
+    },
+    accessControl: {
+      driveAclEnforced: enforceDriveAcl,
+      viewerProvided: Boolean(viewer),
+      driveAclDeniedCount: enforceDriveAcl ? driveAclDeniedCount : 0,
     },
     acknowledgements,
     acknowledgementForRole: acknowledgements.find((a) => a.role === normalized) || null,

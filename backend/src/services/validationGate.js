@@ -14,10 +14,95 @@ import { detectContradictions, scoreConfidence } from "./llm.js";
 const VALIDATION_RULES = [
   { id: "citation_integrity", name: "Citation Integrity", type: "citation_integrity", severity: "critical", enabled: true },
   { id: "contradiction", name: "Contradiction Detection", type: "contradiction", severity: "warning", enabled: true },
+  { id: "meeting_authority", name: "Meeting Summary Authority", type: "meeting_authority", severity: "warning", enabled: true },
   { id: "confidence", name: "Confidence Recalculation", type: "confidence", severity: "warning", enabled: true },
   { id: "permission", name: "Permission Re-validation", type: "permission", severity: "critical", enabled: true },
   { id: "completeness", name: "Completeness Check", type: "completeness", severity: "warning", enabled: true },
 ];
+
+const MEETING_SUMMARY_CONFIDENCE_CAP = 0.6;
+
+function isLowAuthorityMeetingClaim(claim) {
+  const st = String(claim?.sourceType || "").toLowerCase();
+  const authority = String(claim?.sourceAuthority || claim?.proof?.authority || "").toLowerCase();
+  return (st === "meeting_summary" || claim?.proof?.type === "meeting_summary") && (authority === "low" || authority === "");
+}
+
+function isCorroboratedClaim(claim) {
+  if (claim?.corroborated === true) return true;
+  const count = Number(claim?.corroborationCount);
+  if (Number.isFinite(count) && count > 0) return true;
+  if (Array.isArray(claim?.corroboratedBy) && claim.corroboratedBy.length > 0) return true;
+  return false;
+}
+
+function applyMeetingAuthorityCap(claim, score) {
+  if (!isLowAuthorityMeetingClaim(claim) || isCorroboratedClaim(claim)) return score;
+  return Math.min(typeof score === "number" ? score : 0.5, MEETING_SUMMARY_CONFIDENCE_CAP);
+}
+
+async function checkMeetingAuthority() {
+  const claims = await getAllClaims();
+  const uncapped = [];
+  const uncited = [];
+  const needsCorroboration = [];
+
+  for (const claim of claims) {
+    if (!isLowAuthorityMeetingClaim(claim)) continue;
+    const corroborated = isCorroboratedClaim(claim);
+    const conf = typeof claim.confidence === "number" ? claim.confidence : 0;
+
+    if (!corroborated) needsCorroboration.push(claim.id);
+    if (!corroborated && conf > MEETING_SUMMARY_CONFIDENCE_CAP + 0.0001) {
+      const clamped = MEETING_SUMMARY_CONFIDENCE_CAP;
+      uncapped.push({ claimId: claim.id, previousConfidence: conf, clampedConfidence: clamped, text: (claim.text || "").slice(0, 120) });
+      try {
+        await updateClaim(claim.id, {
+          confidence: clamped,
+          needsCorroboration: true,
+          sourceAuthority: "low",
+          corroborated: false,
+          proof: { ...(claim.proof && typeof claim.proof === "object" ? claim.proof : {}), type: "meeting_summary", authority: "low", corroborated: false, confidenceCap: MEETING_SUMMARY_CONFIDENCE_CAP },
+        });
+      } catch (e) { /* non-fatal */ }
+    } else if (!corroborated && claim.needsCorroboration !== true) {
+      try { await updateClaim(claim.id, { needsCorroboration: true, sourceAuthority: "low" }); } catch (e) { /* non-fatal */ }
+    }
+
+    const hasCitation = Boolean(claim.sourceUrl || claim?.proof?.meetingId || claim?.proof?.sourceUrl);
+    if (!hasCitation) uncited.push(claim.id);
+  }
+
+  if (uncapped.length > 0 || uncited.length > 0) {
+    return {
+      id: "meeting_authority",
+      name: "Meeting Summary Authority",
+      type: "meeting_authority",
+      status: "warning",
+      severity: "warning",
+      detail: `${needsCorroboration.length} uncorroborated low-authority meeting claim(s); ${uncapped.length} clamped to ${MEETING_SUMMARY_CONFIDENCE_CAP}; ${uncited.length} missing citation.`,
+      uncappedClaims: uncapped,
+      uncitedMeetingClaims: uncited,
+      needsCorroborationCount: needsCorroboration.length,
+      confidenceCap: MEETING_SUMMARY_CONFIDENCE_CAP,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  return {
+    id: "meeting_authority",
+    name: "Meeting Summary Authority",
+    type: "meeting_authority",
+    status: "pass",
+    severity: "warning",
+    detail: needsCorroboration.length > 0
+      ? `${needsCorroboration.length} uncorroborated meeting claim(s) correctly capped at <= ${MEETING_SUMMARY_CONFIDENCE_CAP}.`
+      : "No uncorroborated low-authority meeting claims requiring enforcement.",
+    needsCorroborationCount: needsCorroboration.length,
+    confidenceCap: MEETING_SUMMARY_CONFIDENCE_CAP,
+    checkedAt: new Date().toISOString(),
+  };
+}
 
 /**
  * Run the full validation gate on a handover version.
@@ -41,21 +126,28 @@ export async function runValidationGate(handoverVersionId, roleId = null) {
     criticalFailures.push(contradictionResult.detail);
   }
 
-  // 3. Confidence Recalculation
+  // 3. Meeting authority / confidence cap enforcement (uncorroborated low-authority meeting summaries)
+  const meetingAuthorityResult = await checkMeetingAuthority();
+  results.push(meetingAuthorityResult);
+  if (meetingAuthorityResult.status === "fail" && meetingAuthorityResult.severity === "critical") {
+    criticalFailures.push(meetingAuthorityResult.detail);
+  }
+
+  // 4. Confidence Recalculation
   const confidenceResult = await recalculateConfidence();
   results.push(confidenceResult);
   if (confidenceResult.status === "fail" && confidenceResult.severity === "critical") {
     criticalFailures.push(confidenceResult.detail);
   }
 
-  // 4. Permission Re-validation
+  // 5. Permission Re-validation
   const permissionResult = await checkPermissions(roleId);
   results.push(permissionResult);
   if (permissionResult.status === "fail" && permissionResult.severity === "critical") {
     criticalFailures.push(permissionResult.detail);
   }
 
-  // 5. Completeness Check
+  // 6. Completeness Check
   const completenessResult = await checkCompleteness();
   results.push(completenessResult);
   if (completenessResult.status === "fail" && completenessResult.severity === "critical") {
@@ -183,24 +275,36 @@ async function recalculateConfidence() {
         claim.text,
         claim.sourceType,
         claim.createdAt,
-        1 // corroboration count - could be enhanced
+        isCorroboratedClaim(claim) ? Math.max(2, Number(claim.corroborationCount) || 2) : 1
       );
 
-      const score = typeof scoreResult?.score === "number" ? scoreResult.score : 0.5;
-      if (score < 0.5) {
+      let score = typeof scoreResult?.score === "number" ? scoreResult.score : 0.5;
+      // Enforce lower-authority meeting-summary cap: <= 0.6 until corroborated
+      const cappedScore = applyMeetingAuthorityCap(claim, score);
+      const wasCapped = cappedScore !== score;
+      score = cappedScore;
+
+      const updates = {};
+      if (Math.abs((claim.confidence ?? 0) - score) > 0.0001) updates.confidence = score;
+      if (isLowAuthorityMeetingClaim(claim) && !isCorroboratedClaim(claim)) {
+        updates.needsCorroboration = true;
+        updates.sourceAuthority = "low";
+      }
+      if (Object.keys(updates).length > 0) {
+        try { await updateClaim(claim.id, updates); } catch (e) { /* non-fatal */ }
+      }
+
+      if (score < 0.5 || wasCapped) {
         lowConfidence.push({
           claimId: claim.id,
           claimText: claim.text,
           score,
-          reasoning: scoreResult?.reasoning || "Low confidence",
+          reasoning: wasCapped
+            ? `Capped at ${MEETING_SUMMARY_CONFIDENCE_CAP} (uncorroborated low-authority meeting summary)`
+            : (scoreResult?.reasoning || "Low confidence"),
+          capped: wasCapped,
+          sourceAuthority: claim.sourceAuthority || (isLowAuthorityMeetingClaim(claim) ? "low" : null),
         });
-
-        // Update the claim's confidence in storage
-        try {
-          await updateClaim(claim.id, { confidence: score });
-        } catch (e) {
-          // Non-fatal: storage update may fail in fallback environments
-        }
       }
     } catch (e) {
       // Skip if LLM is unavailable

@@ -10,6 +10,12 @@ type Claim = {
   status: string;
   sourceUrl?: string;
   sourceType?: string;
+  sourceProvider?: string;
+  sourceAuthority?: "low" | "high" | string | null;
+  meetingId?: string | null;
+  corroborated?: boolean;
+  corroborationCount?: number;
+  needsCorroboration?: boolean;
   createdAt?: string;
   author?: string;
   isLeaver?: boolean;
@@ -215,6 +221,17 @@ export default function Home() {
   const statusColor = (status: string) => ({
     merged: "#10b981", open: "#3b82f6", closed: "#6b7280", commented: "#8b5cf6", reviewed: "#ec4899", proposed: "#f59e0b", accepted: "#10b981",
   } as Record<string, string>)[status] || "#6b7280";
+
+  const isMeetingSummaryClaim = (claim: Claim) =>
+    claim.sourceType === "meeting_summary" || claim.proof?.type === "meeting_summary" || String(claim.sourceAuthority || "").toLowerCase() === "low";
+  const isUncorroboratedLowAuthority = (claim: Claim) =>
+    isMeetingSummaryClaim(claim) && !claim.corroborated && !(Number(claim.corroborationCount) > 0);
+  const confidenceDisplay = (claim: Claim) => {
+    if (typeof claim.confidence !== "number") return "-";
+    const pct = `${(claim.confidence * 100).toFixed(0)}%`;
+    if (isUncorroboratedLowAuthority(claim)) return `${pct} (capped ≤60%)`;
+    return pct;
+  };
 
   const Citation = ({ url }: { url?: string }) => url ? (
     <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: "#3b82f6", textDecoration: "none", fontSize: 12, fontWeight: 600 }}>View source</a>
@@ -431,11 +448,30 @@ export default function Home() {
                       </td>
                       <td style={{ padding: "14px 16px" }}><span style={{ display: "inline-block", padding: "4px 8px", borderRadius: 6, background: `${typeColor(claim.type)}15`, color: typeColor(claim.type), fontSize: 11, fontWeight: 600 }}>{claim.type.replace(/_/g, " ").toUpperCase()}</span></td>
                       <td style={{ padding: "14px 16px" }}><span style={{ display: "inline-block", padding: "4px 8px", borderRadius: 6, background: `${statusColor(claim.status)}15`, color: statusColor(claim.status), fontSize: 11, fontWeight: 600 }}>{String(claim.status || "").toUpperCase()}</span></td>
-                      <td style={{ padding: "14px 16px" }}>{typeof claim.confidence === "number" ? `${(claim.confidence * 100).toFixed(0)}%` : "-"}</td>
+                      <td style={{ padding: "14px 16px" }}>
+                        <div>{confidenceDisplay(claim)}</div>
+                        {isMeetingSummaryClaim(claim) && (
+                          <div style={{ marginTop: 4, display: "flex", gap: 4, flexWrap: "wrap" }}>
+                            <span title="AI meeting summaries are lower-authority sources" style={{ fontSize: 10, fontWeight: 700, color: "#92400e", background: "#fef3c7", border: "1px solid #fcd34d", padding: "2px 6px", borderRadius: 4 }}>
+                              LOW AUTHORITY{claim.sourceProvider ? ` · ${String(claim.sourceProvider).toUpperCase()}` : ""}
+                            </span>
+                            {isUncorroboratedLowAuthority(claim) ? (
+                              <span title="Confidence capped at 60% until corroborated by higher-authority or approved evidence" style={{ fontSize: 10, fontWeight: 700, color: "#991b1b", background: "#fee2e2", border: "1px solid #fecaca", padding: "2px 6px", borderRadius: 4 }}>
+                                NEEDS CORROBORATION
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: 10, fontWeight: 700, color: "#166534", background: "#dcfce7", border: "1px solid #bbf7d0", padding: "2px 6px", borderRadius: 4 }}>
+                                CORROBORATED
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ padding: "14px 16px", color: "#64748b" }}>{claim.author || "Unknown"}{claim.isLeaver && <span style={{ marginLeft: 6, padding: "2px 6px", borderRadius: 4, background: "#ec4899", color: "white", fontSize: 10, fontWeight: 700 }}>LEAVER</span>}</td>
                       <td style={{ padding: "14px 16px" }}>
                         <Citation url={claim.sourceUrl} />
                         {claim.proof?.type && <div style={{ marginTop: 4, fontSize: 10, color: "#64748b", background: "#f8fafc", padding: "2px 6px", borderRadius: 4, display: "inline-block" }}>{String(claim.proof.type).replace(/_/g, " ").toUpperCase()}</div>}
+                        {claim.sourceType === "meeting_summary" && <div style={{ marginTop: 4, fontSize: 10, color: "#92400e", background: "#fffbeb", padding: "2px 6px", borderRadius: 4, display: "inline-block" }}>MEETING SUMMARY</div>}
                       </td>
                       <td style={{ padding: "14px 16px" }}>{claim.redacted ? <span title={claim.redactionReason || "Redacted"} style={{ color: "#b91c1c", fontWeight: 700 }}>Redacted ({claim.redactionLevel || "partial"})</span> : <span style={{ color: "#15803d", fontWeight: 600 }}>Visible</span>}</td>
                     </tr>

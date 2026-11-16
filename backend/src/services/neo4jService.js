@@ -47,11 +47,70 @@ async function ensureConnection() {
 
 // --- Claim Operations ---
 
+function parseJsonMaybe(value) {
+  if (typeof value !== "string") return value;
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+function normalizeClaimForStorage(claim) {
+  const proof = claim.proof;
+  const corroboratedBy = claim.corroboratedBy;
+  const access = claim.access;
+  return {
+    id: claim.id,
+    type: claim.type || null,
+    text: claim.text || null,
+    confidence: claim.confidence ?? 0.5,
+    status: claim.status || "proposed",
+    sourceUrl: claim.sourceUrl || null,
+    sourceType: claim.sourceType || null,
+    createdAt: claim.createdAt || new Date().toISOString(),
+    updatedAt: claim.updatedAt || claim.createdAt || new Date().toISOString(),
+    author: claim.author || null,
+    isLeaver: claim.isLeaver ?? false,
+    body: claim.body || null,
+    labels: Array.isArray(claim.labels) ? claim.labels : (claim.labels ? [String(claim.labels)] : []),
+    assignees: Array.isArray(claim.assignees) ? claim.assignees : (claim.assignees ? [String(claim.assignees)] : []),
+    reviewers: Array.isArray(claim.reviewers) ? claim.reviewers : (claim.reviewers ? [String(claim.reviewers)] : []),
+    parentPr: claim.parentPr ?? null,
+    parentPrTitle: claim.parentPrTitle || null,
+    parentIssue: claim.parentIssue ?? null,
+    parentIssueTitle: claim.parentIssueTitle || null,
+    fileName: claim.fileName || null,
+    fileId: claim.fileId || null,
+    sourceProvider: claim.sourceProvider || claim.provider || null,
+    meetingId: claim.meetingId || null,
+    sourceAuthority: claim.sourceAuthority || null,
+    corroborated: claim.corroborated ?? false,
+    corroborationCount: Number.isFinite(Number(claim.corroborationCount)) ? Number(claim.corroborationCount) : (Array.isArray(corroboratedBy) ? corroboratedBy.length : 0),
+    corroboratedBy: corroboratedBy == null ? null : (typeof corroboratedBy === "string" ? corroboratedBy : JSON.stringify(corroboratedBy)),
+    needsCorroboration: claim.needsCorroboration ?? false,
+    proof: proof == null ? null : (typeof proof === "string" ? proof : JSON.stringify(proof)),
+    access: access == null ? null : (typeof access === "string" ? access : JSON.stringify(access)),
+  };
+}
+
+function hydrateClaim(claim) {
+  if (!claim) return claim;
+  const out = { ...claim };
+  if (typeof out.proof === "string") out.proof = parseJsonMaybe(out.proof);
+  if (typeof out.corroboratedBy === "string") out.corroboratedBy = parseJsonMaybe(out.corroboratedBy);
+  if (typeof out.access === "string") out.access = parseJsonMaybe(out.access);
+  if (Array.isArray(out.corroboratedBy)) {
+    out.corroborationCount = Number.isFinite(Number(out.corroborationCount)) ? Number(out.corroborationCount) : out.corroboratedBy.length;
+  } else if (out.corroboratedBy == null && !Number.isFinite(Number(out.corroborationCount))) {
+    out.corroborationCount = 0;
+  }
+  return out;
+}
+
 export async function createClaim(claim) {
+  const normalized = normalizeClaimForStorage(claim);
   const connected = await ensureConnection();
   if (!connected) {
-    claims.push(claim);
-    return claim;
+    const stored = hydrateClaim({ ...claim, ...normalized, proof: claim.proof ?? null, corroboratedBy: claim.corroboratedBy ?? null, access: claim.access ?? null });
+    claims.push(stored);
+    return stored;
   }
 
   const session = getSession();
@@ -78,34 +137,21 @@ export async function createClaim(claim) {
         parentIssue: $parentIssue,
         parentIssueTitle: $parentIssueTitle,
         fileName: $fileName,
-        fileId: $fileId
+        fileId: $fileId,
+        sourceProvider: $sourceProvider,
+        meetingId: $meetingId,
+        sourceAuthority: $sourceAuthority,
+        corroborated: $corroborated,
+        corroborationCount: $corroborationCount,
+        corroboratedBy: $corroboratedBy,
+        needsCorroboration: $needsCorroboration,
+        proof: $proof,
+        access: $access
       })
       RETURN c`,
-      {
-        id: claim.id,
-        type: claim.type,
-        text: claim.text,
-        confidence: claim.confidence ?? 0.5,
-        status: claim.status,
-        sourceUrl: claim.sourceUrl,
-        sourceType: claim.sourceType,
-        createdAt: claim.createdAt,
-        updatedAt: claim.updatedAt || claim.createdAt,
-        author: claim.author || null,
-        isLeaver: claim.isLeaver ?? false,
-        body: claim.body || null,
-        labels: claim.labels || [],
-        assignees: claim.assignees || [],
-        reviewers: claim.reviewers || [],
-        parentPr: claim.parentPr || null,
-        parentPrTitle: claim.parentPrTitle || null,
-        parentIssue: claim.parentIssue || null,
-        parentIssueTitle: claim.parentIssueTitle || null,
-        fileName: claim.fileName || null,
-        fileId: claim.fileId || null,
-      }
+      normalized
     );
-    return result.records[0].get("c").properties;
+    return hydrateClaim(result.records[0].get("c").properties);
   } finally {
     await session.close();
   }
@@ -114,7 +160,7 @@ export async function createClaim(claim) {
 export async function getAllClaims(filters = {}) {
   const connected = await ensureConnection();
   if (!connected) {
-    let filtered = claims;
+    let filtered = claims.map(hydrateClaim);
     if (filters.status) filtered = filtered.filter((c) => c.status === filters.status);
     if (filters.type) filtered = filtered.filter((c) => c.type === filters.type);
     if (filters.isLeaver !== undefined) filtered = filtered.filter((c) => c.isLeaver === filters.isLeaver);
@@ -147,7 +193,7 @@ export async function getAllClaims(filters = {}) {
     query += " RETURN c ORDER BY c.createdAt DESC";
 
     const result = await session.run(query, params);
-    return result.records.map((r) => r.get("c").properties);
+    return result.records.map((r) => hydrateClaim(r.get("c").properties));
   } finally {
     await session.close();
   }
@@ -156,7 +202,8 @@ export async function getAllClaims(filters = {}) {
 export async function getClaimById(id) {
   const connected = await ensureConnection();
   if (!connected) {
-    return claims.find((c) => c.id === id) || null;
+    const found = claims.find((c) => c.id === id) || null;
+    return found ? hydrateClaim(found) : null;
   }
 
   const session = getSession();
@@ -166,7 +213,7 @@ export async function getClaimById(id) {
       { id }
     );
     if (result.records.length === 0) return null;
-    return result.records[0].get("c").properties;
+    return hydrateClaim(result.records[0].get("c").properties);
   } finally {
     await session.close();
   }
@@ -177,28 +224,45 @@ export async function updateClaim(id, updates) {
   if (!connected) {
     const claim = claims.find((c) => c.id === id);
     if (!claim) return null;
-    if (updates.status !== undefined) claim.status = updates.status;
-    if (updates.text !== undefined) claim.text = updates.text;
-    if (updates.confidence !== undefined) claim.confidence = updates.confidence;
-    return claim;
+    const setFields = [
+      "status", "text", "confidence", "body", "author", "isLeaver", "sourceUrl", "sourceType",
+      "sourceAuthority", "sourceProvider", "meetingId", "corroborated", "corroborationCount",
+      "needsCorroboration", "type", "fileName", "fileId"
+    ];
+    for (const f of setFields) if (updates[f] !== undefined) claim[f] = updates[f];
+    if (updates.proof !== undefined) claim.proof = updates.proof;
+    if (updates.corroboratedBy !== undefined) claim.corroboratedBy = updates.corroboratedBy;
+    if (updates.access !== undefined) claim.access = updates.access;
+    claim.updatedAt = new Date().toISOString();
+    return hydrateClaim(claim);
   }
 
   const session = getSession();
   try {
     const setClauses = [];
     const params = { id };
-
-    if (updates.status !== undefined) {
-      setClauses.push("c.status = $status");
-      params.status = updates.status;
+    const simpleFields = [
+      "status", "text", "confidence", "body", "author", "isLeaver", "sourceUrl", "sourceType",
+      "sourceAuthority", "sourceProvider", "meetingId", "corroborated", "corroborationCount",
+      "needsCorroboration", "type", "fileName", "fileId"
+    ];
+    for (const f of simpleFields) {
+      if (updates[f] !== undefined) {
+        setClauses.push(`c.${f} = $${f}`);
+        params[f] = updates[f];
+      }
     }
-    if (updates.text !== undefined) {
-      setClauses.push("c.text = $text");
-      params.text = updates.text;
+    if (updates.proof !== undefined) {
+      setClauses.push("c.proof = $proof");
+      params.proof = typeof updates.proof === "string" ? updates.proof : JSON.stringify(updates.proof);
     }
-    if (updates.confidence !== undefined) {
-      setClauses.push("c.confidence = $confidence");
-      params.confidence = updates.confidence;
+    if (updates.corroboratedBy !== undefined) {
+      setClauses.push("c.corroboratedBy = $corroboratedBy");
+      params.corroboratedBy = typeof updates.corroboratedBy === "string" ? updates.corroboratedBy : JSON.stringify(updates.corroboratedBy);
+    }
+    if (updates.access !== undefined) {
+      setClauses.push("c.access = $access");
+      params.access = typeof updates.access === "string" ? updates.access : JSON.stringify(updates.access);
     }
 
     setClauses.push("c.updatedAt = $updatedAt");
@@ -208,7 +272,7 @@ export async function updateClaim(id, updates) {
     const result = await session.run(query, params);
 
     if (result.records.length === 0) return null;
-    return result.records[0].get("c").properties;
+    return hydrateClaim(result.records[0].get("c").properties);
   } finally {
     await session.close();
   }
@@ -237,36 +301,85 @@ export async function deleteClaim(id) {
 
 // --- Source Operations ---
 
+function normalizeSourceForStorage(source) {
+  const acl = source.acl;
+  const aclString = acl == null ? null : typeof acl === "string" ? acl : JSON.stringify(acl);
+  const metadata = source.metadata;
+  const metadataString = metadata == null ? null : typeof metadata === "string" ? metadata : JSON.stringify(metadata);
+  return {
+    url: source.url,
+    type: source.type || null,
+    content: source.content || null,
+    author: source.author || null,
+    fileName: source.fileName || null,
+    fileId: source.fileId || null,
+    mimeType: source.mimeType || null,
+    webViewLink: source.webViewLink || null,
+    parents: Array.isArray(source.parents) ? source.parents : (source.parents ? [String(source.parents)] : []),
+    driveId: source.driveId || null,
+    ownerEmails: Array.isArray(source.ownerEmails) ? source.ownerEmails : (source.ownerEmails ? [String(source.ownerEmails)] : []),
+    acl: aclString,
+    aclFetchedAt: source.aclFetchedAt || null,
+    provider: source.provider || null,
+    meetingId: source.meetingId || null,
+    sourceAuthority: source.sourceAuthority || null,
+    occurredAt: source.occurredAt || null,
+    metadata: metadataString,
+    createdAt: source.createdAt || new Date().toISOString(),
+  };
+}
+
+function hydrateSource(source) {
+  if (!source) return source;
+  const out = { ...source };
+  if (typeof out.acl === "string") {
+    try { out.acl = JSON.parse(out.acl); } catch { /* keep string */ }
+  }
+  if (typeof out.metadata === "string") {
+    try { out.metadata = JSON.parse(out.metadata); } catch { /* keep string */ }
+  }
+  return out;
+}
+
 export async function createSource(source) {
+  const normalized = normalizeSourceForStorage(source);
   const connected = await ensureConnection();
   if (!connected) {
-    sources.push(source);
-    return source;
+    // upsert-like behavior in memory by url+fileId
+    const idx = sources.findIndex((s) => s.url === normalized.url || (normalized.fileId && s.fileId === normalized.fileId));
+    const hydrated = hydrateSource({ ...source, ...normalized, acl: source.acl ?? null, metadata: source.metadata ?? null });
+    if (idx >= 0) sources[idx] = { ...sources[idx], ...hydrated };
+    else sources.push(hydrated);
+    return hydrated;
   }
 
   const session = getSession();
   try {
     const result = await session.run(
-      `CREATE (s:Source {
-        url: $url,
-        type: $type,
-        content: $content,
-        author: $author,
-        fileName: $fileName,
-        fileId: $fileId,
-        createdAt: datetime()
-      })
-      RETURN s`,
-      {
-        url: source.url,
-        type: source.type,
-        content: source.content || null,
-        author: source.author || null,
-        fileName: source.fileName || null,
-        fileId: source.fileId || null,
-      }
+      `MERGE (s:Source {url: $url})
+       SET s.type = $type,
+           s.content = $content,
+           s.author = $author,
+           s.fileName = $fileName,
+           s.fileId = $fileId,
+           s.mimeType = $mimeType,
+           s.webViewLink = $webViewLink,
+           s.parents = $parents,
+           s.driveId = $driveId,
+           s.ownerEmails = $ownerEmails,
+           s.acl = $acl,
+           s.aclFetchedAt = $aclFetchedAt,
+           s.provider = $provider,
+           s.meetingId = $meetingId,
+           s.sourceAuthority = $sourceAuthority,
+           s.occurredAt = $occurredAt,
+           s.metadata = $metadata,
+           s.createdAt = coalesce(s.createdAt, $createdAt),
+           s.updatedAt = datetime()
+       RETURN s`,
+      normalized
     );
-    return result.records[0].get("s").properties;
+    return hydrateSource(result.records[0].get("s").properties);
   } finally {
     await session.close();
   }
@@ -274,12 +387,12 @@ export async function createSource(source) {
 
 export async function getAllSources() {
   const connected = await ensureConnection();
-  if (!connected) return sources;
+  if (!connected) return sources.map(hydrateSource);
 
   const session = getSession();
   try {
-    const result = await session.run("MATCH (s:Source) RETURN s ORDER BY s.createdAt DESC");
-    return result.records.map((r) => r.get("s").properties);
+    const result = await session.run("MATCH (s:Source) RETURN s ORDER BY coalesce(s.updatedAt, s.createdAt) DESC");
+    return result.records.map((r) => hydrateSource(r.get("s").properties));
   } finally {
     await session.close();
   }
