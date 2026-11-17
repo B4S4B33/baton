@@ -14,10 +14,10 @@ import { claims, sources, stats } from "../store.js";
 
 const router = express.Router();
 const GITHUB_BASE = "https://api.github.com";
-const GITHUB_TIMEOUT_MS = Number(process.env.GITHUB_TIMEOUT_MS) || 15000;
-const GITHUB_MAX_PAGES = Number(process.env.GITHUB_MAX_PAGES) || 5;
-const MAX_LLM_ENRICHMENTS = Number(process.env.MAX_LLM_ENRICHMENTS) || 20;
-const LLM_ENRICHMENT_CONCURRENCY = Number(process.env.LLM_ENRICHMENT_CONCURRENCY) || 3;
+const GITHUB_TIMEOUT_MS = Number(process.env.GITHUB_TIMEOUT_MS) || 10000;
+const GITHUB_MAX_PAGES = Number(process.env.GITHUB_MAX_PAGES) || 3;
+const MAX_LLM_ENRICHMENTS = Number(process.env.MAX_LLM_ENRICHMENTS) || 10;
+const LLM_ENRICHMENT_CONCURRENCY = Number(process.env.LLM_ENRICHMENT_CONCURRENCY) || 2;
 
 function githubHeaders(token) {
   const headers = {
